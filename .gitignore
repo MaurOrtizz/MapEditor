@@ -1,2 +1,7 @@
 venv/
 node_modules/
+map-editor/.vite/
+map-editor/node_modules/
+map-editor/dist/
+__pycache__/
+*.pyc
