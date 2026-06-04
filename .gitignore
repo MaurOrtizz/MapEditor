@@ -5,3 +5,5 @@ map-editor/node_modules/
 map-editor/dist/
 __pycache__/
 *.pyc
+*.env
+*.db

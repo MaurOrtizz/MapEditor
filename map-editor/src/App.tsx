@@ -2,8 +2,12 @@ import { useState, useCallback } from 'react';
 import Map, { Source, Layer } from 'react-map-gl/maplibre';
 import type { MapLayerMouseEvent } from 'react-map-gl/maplibre';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import countriesRaw from './data/countries.geojson?raw';
+import countriesRaw from './data/countries_mid_res.geojson?raw';
+import BlankWorldMap from './data/BlankWorldMap.json'
+import { api, type WorldData } from './api';
+import Navbar from './components/Navbar';
 import CountryPanel from './components/CountryPanel';
+import WorldsPanel from './components/WorldsPanel';
 
 interface CountryData {
   name: string;
@@ -16,10 +20,13 @@ function App() {
   const [hoveredCountry, setHoveredCountry] = useState<string | null>(null);
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null);
   const [countryEdits, setCountryEdits] = useState<Record<string, CountryData>>({});
+  const [showWorldsPanel, setShowWorldsPanel] = useState(false);
+  const [currentWorldId, setCurrentWorldId] = useState<number | null>(null);
+  const [currentWorldName, setCurrentWorldName] = useState<string | null>(null);
 
   const onMouseMove = useCallback((e: MapLayerMouseEvent) => {
     const feature = e.features?.[0];
-    setHoveredCountry(feature ? feature.properties?.NAME : null);
+    setHoveredCountry(feature ? feature.properties?.name : null);
   }, []);
 
   const onMouseLeave = useCallback(() => {
@@ -29,14 +36,14 @@ function App() {
   const onClick = useCallback((e: MapLayerMouseEvent) => {
     const feature = e.features?.[0];
     if (feature) {
-      const name = feature.properties?.NAME;
+      const name = feature.properties?.name;
       setSelectedCountry(name);
       setCountryEdits(prev => ({
         ...prev,
-        [name]: prev[name] ?? { name, color: '#627BC1' }
+        [name]: prev[name] ?? { name, color: '#dcdcdc' }
       }));
     } else {
-      setSelectedCountry(null); // click en océano = deseleccionar
+      setSelectedCountry(null);
     }
   }, []);
 
@@ -46,23 +53,41 @@ function App() {
     setCountryEdits(prev => ({ ...prev, [selectedCountry]: data }));
   }, [selectedCountry]);
 
-  const fillColorExpression: any = [
-    'case',
-    ['==', ['get', 'NAME'], selectedCountry], '#F59E0B',
-    ['==', ['get', 'NAME'], hoveredCountry], '#93C5FD',
-    '#627BC1'
-  ];
+  const handleSave = useCallback(async () => {
+    if (currentWorldId) {
+      await api.updateWorld(currentWorldId, {
+        name: currentWorldName!,
+        edits: countryEdits
+      });
+      alert('World saved!');
+    } else {
+      const name = prompt('Name your world:');
+      if (!name) return;
+      const created = await api.createWorld({ name, edits: countryEdits });
+      setCurrentWorldId(created.id!);
+      setCurrentWorldName(created.name);
+      alert('World saved!');
+    }
+  }, [currentWorldId, currentWorldName, countryEdits]);
 
+  const handleLoad = useCallback((world: WorldData) => {
+    setCountryEdits(world.edits);
+    setCurrentWorldId(world.id!);
+    setCurrentWorldName(world.name);
+    setShowWorldsPanel(false);
+    setSelectedCountry(null);
+  }, []);
+    
   const modifiedGeoJSON = {
     ...countriesData,
     features: countriesData.features.map((feature: any) => {
-      const name = feature.properties?.NAME;
+      const name = feature.properties?.name;
       const edit = countryEdits[name];
       return {
         ...feature,
         properties: {
           ...feature.properties,
-          customColor: edit?.color ?? '#627BC1'
+          customColor: edit?.color ?? '#dcdcdc'
         }
       };
     })
@@ -70,10 +95,17 @@ function App() {
 
   return (
     <div style={{ width: '100vw', height: '100vh' }}>
+      <Navbar
+        onSave={handleSave}
+        onMyWorlds={() => {
+          setShowWorldsPanel(prev => !prev);
+          setSelectedCountry(null);
+        }}
+      />
       <Map
         initialViewState={{ longitude: 0, latitude: 20, zoom: 1.5 }}
         style={{ width: '100%', height: '100%' }}
-        mapStyle="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+        mapStyle={BlankWorldMap}
         interactiveLayerIds={['countries-fill']}
         onMouseMove={onMouseMove}
         onMouseLeave={onMouseLeave}
@@ -86,25 +118,32 @@ function App() {
             paint={{
               'fill-color': [
                 'case',
-                ['==', ['get', 'NAME'], selectedCountry], '#F59E0B',
-                ['==', ['get', 'NAME'], hoveredCountry], '#93C5FD',
+                ['==', ['get', 'name'], selectedCountry], '#613e00',
+                ['==', ['get', 'name'], hoveredCountry], '#031a34',
                 ['get', 'customColor']
               ],
-              'fill-opacity': 0.6
+              'fill-opacity': 0.5
             }}
           />
           <Layer
             id="countries-border"
             type="line"
             paint={{
-              'line-color': '#ffffff',
+              'line-color': '#1a1a2e',
               'line-width': 1
             }}
           />
         </Source>
       </Map>
 
-      {selectedCountry && countryEdits[selectedCountry] && (
+      {showWorldsPanel && (
+        <WorldsPanel
+          onLoad={handleLoad}
+          onClose={() => setShowWorldsPanel(false)}
+        />
+      )}
+
+      {!showWorldsPanel && selectedCountry && countryEdits[selectedCountry] && (
         <CountryPanel
           countryName={selectedCountry}
           data={countryEdits[selectedCountry]}

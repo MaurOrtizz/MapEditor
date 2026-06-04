@@ -23,10 +23,10 @@ function CountryPanel({ countryName, data, onChange }: CountryPanelProps) {
   return (
     <div style={{
       position: 'absolute',
-      top: 0,
+      top: 52,
       right: 0,
       width: 300,
-      height: '100vh',
+      height: 'calc(100vh - 52px)',
       background: 'white',
       boxShadow: '-2px 0 8px rgba(0,0,0,0.15)',
       padding: 24,
@@ -38,7 +38,7 @@ function CountryPanel({ countryName, data, onChange }: CountryPanelProps) {
       zIndex: 10
     }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <label style={{ fontSize: 12, color: '#666', fontWeight: 600 }}>NOMBRE EN TU MUNDO</label>
+        <label style={{ fontSize: 12, color: '#666', fontWeight: 600 }}>NAME</label>
         <input
           type="text"
           value={data.name}
