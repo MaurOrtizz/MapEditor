@@ -10,12 +10,13 @@ interface CountryPanelProps {
   data: CountryData;
   onChange: (data: CountryData) => void;
   onClose: () => void;
+  isEditing: boolean;
+  onEditBorders: () => void;
+  onDoneEditing: () => void;
 }
 
-function CountryPanel({ countryName, data, onChange }: CountryPanelProps) {
-  const [localColor, setLocalColor] = useState(data.color);
+function CountryPanel({ countryName, data, onChange, onClose, isEditing, onEditBorders, onDoneEditing }: CountryPanelProps) {  const [localColor, setLocalColor] = useState(data.color);
 
-  // Si cambia el país seleccionado, sincroniza el color local
   useEffect(() => {
     setLocalColor(data.color);
   }, [countryName]);
@@ -37,6 +38,9 @@ function CountryPanel({ countryName, data, onChange }: CountryPanelProps) {
       overflowY: 'auto',
       zIndex: 10
     }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <button onClick={onClose} style={{ cursor: 'pointer', border: 'none', background: 'none', fontSize: 18, color: '#666' }}>✕</button>
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         <label style={{ fontSize: 12, color: '#666', fontWeight: 600 }}>NAME</label>
         <input
@@ -64,6 +68,41 @@ function CountryPanel({ countryName, data, onChange }: CountryPanelProps) {
           />
           <span style={{ fontSize: 14, color: '#444' }}>{localColor}</span>
         </div>
+      </div>
+      <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {!isEditing ? (
+          <button
+            onClick={onEditBorders}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 6,
+              border: 'none',
+              background: '#4f46e5',
+              color: 'white',
+              cursor: 'pointer',
+              fontSize: 14,
+              fontFamily: 'sans-serif'
+            }}
+          >
+            Edit Borders
+          </button>
+        ) : (
+          <button
+            onClick={onDoneEditing}
+            style={{
+              padding: '8px 16px',
+              borderRadius: 6,
+              border: 'none',
+              background: '#16a34a',
+              color: 'white',
+              cursor: 'pointer',
+              fontSize: 14,
+              fontFamily: 'sans-serif'
+            }}
+          >
+            Done
+          </button>
+        )}
       </div>
     </div>
   );
