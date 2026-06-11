@@ -3,7 +3,7 @@ const BASE_URL = import.meta.env.VITE_API_URL;
 export interface WorldData {
   id?: number;
   name: string;
-  edits: Record<string, { name: string; color: string }>;
+  edits: Record<string, { name: string; color: string; geometry?: any }>;
 }
 
 export const api = {

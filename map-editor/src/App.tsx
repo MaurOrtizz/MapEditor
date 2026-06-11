@@ -13,6 +13,7 @@ import WorldsPanel from './components/WorldsPanel';
 interface CountryData {
   name: string;
   color: string;
+  geometry?: any;
 }
 
 const BlankWorldMap = BlankWorldMapJson as unknown as StyleSpecification;
@@ -50,7 +51,7 @@ const [draggingVertex, setDraggingVertex] = useState<{
       }));
     } else {
       setSelectedCountry(null);
-      setEditingCountry(null); // <- agrega esto
+      setEditingCountry(null);
     }
   }, []);
 
@@ -97,7 +98,30 @@ const [draggingVertex, setDraggingVertex] = useState<{
     setCurrentWorldName(world.name);
     setShowWorldsPanel(false);
     setSelectedCountry(null);
+
+    const geometries: Record<string, any> = {};
+    Object.entries(world.edits).forEach(([name, data]) => {
+      if (data.geometry) {
+        geometries[name] = data.geometry;
+      }
+    });
+    setEditedGeometries(geometries);
   }, []);
+
+  const handleDoneEditing = useCallback(() => {
+    if (!editingCountry) return;
+    const geometry = editedGeometries[editingCountry];
+    if (geometry) {
+      setCountryEdits(prev => ({
+        ...prev,
+        [editingCountry]: {
+          ...prev[editingCountry],
+          geometry
+        }
+      }));
+    }
+    setEditingCountry(null);
+  }, [editingCountry, editedGeometries]);
     
   const modifiedGeoJSON = {
     ...countriesData,
@@ -106,10 +130,9 @@ const [draggingVertex, setDraggingVertex] = useState<{
       .map((feature: any) => {
         const name = feature.properties?.name;
         const edit = countryEdits[name];
-        const editedGeometry = editedGeometries[name];
         return {
           ...feature,
-          geometry: editedGeometry ?? feature.geometry,
+          geometry: edit?.geometry ?? feature.geometry,
           properties: {
             ...feature.properties,
             customColor: edit?.color ?? '#dcdcdc'
@@ -193,9 +216,21 @@ const [draggingVertex, setDraggingVertex] = useState<{
       const geometry = JSON.parse(JSON.stringify(base));
 
       if (geometry.type === 'Polygon') {
-        geometry.coordinates[draggingVertex.ringIndex][draggingVertex.vertexIndex] = newCoord;
+        const ring = geometry.coordinates[draggingVertex.ringIndex];
+        ring[draggingVertex.vertexIndex] = newCoord;
+        if (draggingVertex.vertexIndex === 0) {
+          ring[ring.length - 1] = newCoord;
+        } else if (draggingVertex.vertexIndex === ring.length - 1) {
+          ring[0] = newCoord;
+        }
       } else if (geometry.type === 'MultiPolygon') {
-        geometry.coordinates[draggingVertex.polygonIndex][draggingVertex.ringIndex][draggingVertex.vertexIndex] = newCoord;
+        const ring = geometry.coordinates[draggingVertex.polygonIndex][draggingVertex.ringIndex];
+        ring[draggingVertex.vertexIndex] = newCoord;
+        if (draggingVertex.vertexIndex === 0) {
+          ring[ring.length - 1] = newCoord;
+        } else if (draggingVertex.vertexIndex === ring.length - 1) {
+          ring[0] = newCoord;
+        }
       }
 
       return { ...prev, [editingCountry]: geometry };
@@ -326,7 +361,7 @@ const [draggingVertex, setDraggingVertex] = useState<{
           }}
           isEditing={editingCountry === selectedCountry}
           onEditBorders={() => setEditingCountry(selectedCountry)}
-          onDoneEditing={() => setEditingCountry(null)}
+          onDoneEditing={handleDoneEditing}
         />
       )}
     </div>
