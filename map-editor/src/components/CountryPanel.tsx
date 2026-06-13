@@ -10,12 +10,27 @@ interface CountryPanelProps {
   data: CountryData;
   onChange: (data: CountryData) => void;
   onClose: () => void;
-  isEditing: boolean;
-  onEditBorders: () => void;
+  editingCountry: string | null;
+  editMode: 'vertices' | 'draw' | null;
+  onEnterEditMode: () => void;
+  onSetEditMode: (mode: 'vertices' | 'draw' | null) => void;
   onDoneEditing: () => void;
 }
 
-function CountryPanel({ countryName, data, onChange, onClose, isEditing, onEditBorders, onDoneEditing }: CountryPanelProps) {  const [localColor, setLocalColor] = useState(data.color);
+const buttonStyle = (bg: string) => ({
+  padding: '8px 16px',
+  borderRadius: 6,
+  border: 'none',
+  background: bg,
+  color: 'white',
+  cursor: 'pointer',
+  fontSize: 14,
+  fontFamily: 'sans-serif'
+});
+
+
+function CountryPanel({ countryName, data, onChange, onClose, editingCountry, editMode, onEnterEditMode, onSetEditMode, onDoneEditing }: CountryPanelProps) {  
+  const [localColor, setLocalColor] = useState(data.color);
 
   useEffect(() => {
     setLocalColor(data.color);
@@ -70,39 +85,30 @@ function CountryPanel({ countryName, data, onChange, onClose, isEditing, onEditB
           <span style={{ fontSize: 14, color: '#444' }}>{localColor}</span>
         </div>
       </div>
-      <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {!isEditing ? (
-          <button
-            onClick={onEditBorders}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 6,
-              border: 'none',
-              background: '#4f46e5',
-              color: 'white',
-              cursor: 'pointer',
-              fontSize: 14,
-              fontFamily: 'sans-serif'
-            }}
-          >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {editingCountry !== countryName ? (
+          <button onClick={onEnterEditMode} style={buttonStyle('#4f46e5')}>
             Edit Borders
           </button>
         ) : (
-          <button
-            onClick={onDoneEditing}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 6,
-              border: 'none',
-              background: '#16a34a',
-              color: 'white',
-              cursor: 'pointer',
-              fontSize: 14,
-              fontFamily: 'sans-serif'
-            }}
-          >
-            Done
-          </button>
+          <>
+            <button
+              onClick={() => onSetEditMode(editMode === 'vertices' ? null : 'vertices')}
+              style={buttonStyle(editMode === 'vertices' ? '#16a34a' : '#4f46e5')}
+            >
+              Edit Vertices
+            </button>
+            <button
+              onClick={() => onSetEditMode(editMode === 'draw' ? null : 'draw')}
+              style={buttonStyle(editMode === 'draw' ? '#16a34a' : '#4f46e5')}
+            >
+              Draw Territory
+            </button>
+
+            <button onClick={onDoneEditing} style={buttonStyle('#dc2626')}>
+              Done
+            </button>
+          </>
         )}
       </div>
     </div>
