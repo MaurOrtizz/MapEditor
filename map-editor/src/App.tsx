@@ -32,12 +32,13 @@ function App() {
   const [editedGeometries, setEditedGeometries] = useState<Record<string, any>>({});
   const [editMode, setEditMode] = useState<'vertices' | 'draw' | null>(null);
   const [drawingPoints, setDrawingPoints] = useState<number[][]>([]);
-  const [draggingVertex, setDraggingVertex] = useState<{ 
-    index: number; 
-    polygonIndex: number; 
-    ringIndex: number;
-    vertexIndex: number;
-  } | null>(null);
+const [draggingVertex, setDraggingVertex] = useState<{ 
+  index: number; 
+  polygonIndex: number; 
+  ringIndex: number;
+  vertexIndex: number;
+  isDrawingPoint: boolean;
+} | null>(null);
 
   const handleSetEditMode = useCallback((mode: 'vertices' | 'draw' | null) => {
     setEditMode(mode);
@@ -83,8 +84,14 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
         ...prev,
         [name]: prev[name] ?? { name, color: '#dcdcdc' }
       }));
+      const savedGeometry = countryEdits[name]?.geometry;
+      const originalFeature = countriesData.features.find((f: any) => f.properties?.name === name);
+      setEditedGeometries(prev => ({
+        ...prev,
+        [name]: savedGeometry ?? originalFeature?.geometry
+      }));
     }
-  }, []);
+  }, [countryEdits]);
 
 
   const handlePanelChange = useCallback((data: CountryData) => {
@@ -134,7 +141,9 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
       const originalFeature = countriesData.features.find(
         (f: any) => f.properties?.name === editingCountry
       );
-      const baseGeometry = geometry ?? originalFeature.geometry;
+      const baseGeometry = geometry 
+        ?? countryEdits[editingCountry]?.geometry 
+        ?? originalFeature.geometry;
 
       const drawnPolygon = turf.polygon([[...drawingPoints, drawingPoints[0]]]);
       const basePolygon = turf.feature(baseGeometry);
@@ -158,7 +167,7 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
     setEditingCountry(null);
     setEditMode(null);
     setDrawingPoints([]);
-  }, [editingCountry, editedGeometries, drawingPoints]);
+  }, [editingCountry, editedGeometries, drawingPoints, countryEdits]);
     
   const modifiedGeoJSON = {
     ...countriesData,
@@ -178,14 +187,14 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
       })
   };
 
-  const { editingVertices, drawingGeoJSON } = (() => {
-    if (!editingCountry) return { editingVertices: null, drawingGeoJSON: null };
+  const { editingVertices } = (() => {
+    if (!editingCountry) return { editingVertices: null };
 
     const feature = editedGeometries[editingCountry] 
       ? { geometry: editedGeometries[editingCountry] }
       : countriesData.features.find((f: any) => f.properties?.name === editingCountry);
     
-    if (!feature) return { editingVertices: null, drawingGeoJSON: null };
+    if (!feature) return { editingVertices: null };
 
     const allCoords: { coord: number[]; polygonIndex: number; ringIndex: number; vertexIndex: number }[] = [];
 
@@ -207,35 +216,40 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
       }
     }
 
-    const editingVertices = allCoords.length > 0 ? {
+    const editingVertices = allCoords.length > 0 || drawingPoints.length > 0 ? {
       type: 'FeatureCollection' as const,
-      features: allCoords.map((item, index) => ({
-        type: 'Feature' as const,
-        properties: {
-          index,
-          polygonIndex: item.polygonIndex,
-          ringIndex: item.ringIndex,
-          vertexIndex: item.vertexIndex
-        },
-        geometry: { 
-          type: 'Point' as const, 
-          coordinates: item.coord 
-        }
-      }))
+      features: [
+        ...allCoords.map((item, index) => ({
+          type: 'Feature' as const,
+          properties: {
+            index,
+            polygonIndex: item.polygonIndex,
+            ringIndex: item.ringIndex,
+            vertexIndex: item.vertexIndex,
+            isDrawingPoint: false
+          },
+          geometry: {
+            type: 'Point' as const,
+            coordinates: item.coord
+          }
+        })),
+        ...drawingPoints.map((coord, index) => ({
+          type: 'Feature' as const,
+          properties: {
+            index: allCoords.length + index,
+            polygonIndex: -1,
+            ringIndex: -1,
+            vertexIndex: index,
+            isDrawingPoint: true
+          },
+          geometry: {
+            type: 'Point' as const,
+            coordinates: coord
+          }
+        }))
+      ]
     } : null;
-
-    const drawingGeoJSON = drawingPoints.length > 0 ? {
-      type: 'FeatureCollection' as const,
-      features: [{
-        type: 'Feature' as const,
-        properties: {},
-        geometry: drawingPoints.length >= 3
-          ? { type: 'Polygon' as const, coordinates: [[...drawingPoints, drawingPoints[0]]] }
-          : { type: 'LineString' as const, coordinates: drawingPoints }
-      }]
-    } : null;
-
-    return { editingVertices, drawingGeoJSON };
+    return { editingVertices };
   })();
 
   const onVertexMouseDown = useCallback((e: MapLayerMouseEvent) => {
@@ -246,7 +260,8 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
       index: feature.properties?.index,
       polygonIndex: feature.properties?.polygonIndex,
       ringIndex: feature.properties?.ringIndex,
-      vertexIndex: feature.properties?.vertexIndex
+      vertexIndex: feature.properties?.vertexIndex,
+      isDrawingPoint: feature.properties?.isDrawingPoint
     });
   }, []);
 
@@ -259,6 +274,15 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
 
     const { lngLat } = e;
     const newCoord = [lngLat.lng, lngLat.lat];
+
+    if (draggingVertex.isDrawingPoint) {
+      setDrawingPoints(prev => {
+        const updated = [...prev];
+        updated[draggingVertex.vertexIndex] = newCoord;
+        return updated;
+      });
+      return;
+    }
 
     setEditedGeometries(prev => {
       const originalFeature = countriesData.features.find(
@@ -370,8 +394,22 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
                   name: editingCountry,
                   customColor: countryEdits[editingCountry]?.color ?? '#dcdcdc'
                 },
-                geometry: editedGeometries[editingCountry] ?? 
-                  countriesData.features.find((f: any) => f.properties?.name === editingCountry)?.geometry
+                geometry: (() => {
+                  const base = editedGeometries[editingCountry] ?? 
+                    countriesData.features.find((f: any) => f.properties?.name === editingCountry)?.geometry;
+                  
+                  if (drawingPoints.length >= 3) {
+                    try {
+                      const drawnPolygon = turf.polygon([[...drawingPoints, drawingPoints[0]]]);
+                      const basePolygon = turf.feature(base);
+                      const unioned = turf.union(turf.featureCollection([basePolygon as any, drawnPolygon]));
+                      if (unioned) return unioned.geometry;
+                    } catch {
+                      return base;
+                    }
+                  }
+                  return base;
+                })()
               }]
             }}
           >
@@ -389,27 +427,6 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
               paint={{
                 'line-color': '#4f46e5',
                 'line-width': 2
-              }}
-            />
-          </Source>
-        )}
-        {drawingGeoJSON && (
-          <Source id="drawing" type="geojson" data={drawingGeoJSON}>
-            <Layer
-              id="drawing-fill"
-              type="fill"
-              paint={{
-                'fill-color': '#16a34a',
-                'fill-opacity': 0.3
-              }}
-            />
-            <Layer
-              id="drawing-line"
-              type="line"
-              paint={{
-                'line-color': '#16a34a',
-                'line-width': 2,
-                'line-dasharray': [2, 2]
               }}
             />
           </Source>
@@ -435,7 +452,17 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
           }}
           editingCountry={editingCountry}
           editMode={editMode}
-          onEnterEditMode={() => setEditingCountry(selectedCountry)}
+          onEnterEditMode={() => {
+            setEditingCountry(selectedCountry);
+            const savedGeometry = countryEdits[selectedCountry]?.geometry;
+            const originalFeature = countriesData.features.find(
+              (f: any) => f.properties?.name === selectedCountry
+            );
+            setEditedGeometries(prev => ({
+              ...prev,
+              [selectedCountry!]: savedGeometry ?? originalFeature?.geometry
+            }));
+          }}
           onSetEditMode={handleSetEditMode}
           onDoneEditing={handleDoneEditing}
         />
