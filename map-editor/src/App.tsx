@@ -147,27 +147,64 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
 
       const drawnPolygon = turf.polygon([[...drawingPoints, drawingPoints[0]]]);
       const basePolygon = turf.feature(baseGeometry);
-
       const unioned = turf.union(turf.featureCollection([basePolygon as any, drawnPolygon]));
-      if (unioned) {
-        geometry = unioned.geometry;
-      }
+      if (unioned) geometry = unioned.geometry;
     }
 
     if (geometry) {
-      setCountryEdits(prev => ({
-        ...prev,
-        [editingCountry]: {
-          ...prev[editingCountry],
+      const newGeometry = turf.feature(geometry);
+
+      if (!allowOverlapping) {
+        const updatedEdits = { ...countryEdits };
+
+        countriesData.features.forEach((feature: any) => {
+          const name = feature.properties?.name;
+          if (name === editingCountry) return;
+
+          const otherGeometry = countryEdits[name]?.geometry ?? feature.geometry;
+          const otherFeature = turf.feature(otherGeometry);
+
+          try {
+            const intersection = turf.intersect(turf.featureCollection([newGeometry as any, otherFeature as any]));
+            if (!intersection) return;
+
+            const difference = turf.difference(turf.featureCollection([otherFeature as any, newGeometry as any]));
+
+            if (!difference) {
+              const { [name]: _, ...rest } = updatedEdits;
+              Object.assign(updatedEdits, rest);
+            } else {
+              updatedEdits[name] = {
+                ...updatedEdits[name] ?? { name, color: '#dcdcdc' },
+                geometry: difference.geometry
+              };
+            }
+          } catch {
+            return;
+          }
+        });
+
+        updatedEdits[editingCountry] = {
+          ...countryEdits[editingCountry] ?? { name: editingCountry, color: '#dcdcdc' },
           geometry
-        }
-      }));
+        };
+
+        setCountryEdits(updatedEdits);
+      } else {
+        setCountryEdits(prev => ({
+          ...prev,
+          [editingCountry]: {
+            ...prev[editingCountry],
+            geometry
+          }
+        }));
+      }
     }
 
     setEditingCountry(null);
     setEditMode(null);
     setDrawingPoints([]);
-  }, [editingCountry, editedGeometries, drawingPoints, countryEdits]);
+  }, [editingCountry, editedGeometries, drawingPoints, countryEdits, allowOverlapping]);
     
   const modifiedGeoJSON = {
     ...countriesData,
