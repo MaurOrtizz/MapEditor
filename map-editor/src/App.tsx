@@ -51,27 +51,30 @@ const [draggingVertex, setDraggingVertex] = useState<{
     setHoveredCountry(null);
   }, []);
 
-const onClick = useCallback((e: MapLayerMouseEvent) => {
-  if (editMode === 'draw') {
-    const { lngLat } = e;
-    setDrawingPoints(prev => [...prev, [lngLat.lng, lngLat.lat]]);
-    return;
-  }
+  const onClick = useCallback((e: MapLayerMouseEvent) => {
+    if (editMode === 'draw') {
+      const { lngLat } = e;
+      setDrawingPoints(prev => [...prev, [lngLat.lng, lngLat.lat]]);
+      return;
+    }
 
-  const feature = e.features?.[0];
-  if (feature) {
-    const name = feature.properties?.name;
-    setSelectedCountry(name);
-    setCountryEdits(prev => ({
-      ...prev,
-      [name]: prev[name] ?? { name, color: '#dcdcdc' }
-    }));
-  } else {
-    setSelectedCountry(null);
-    setEditingCountry(null);
-    setEditMode(null);
-  }
-}, [editMode]);
+    const feature = e.features?.[0];
+    if (feature) {
+      const name = feature.properties?.name;
+      setSelectedCountry(name);
+      setCountryEdits(prev => {
+        if (prev[name]) return prev;
+        return {
+          ...prev,
+          [name]: { name, color: '#dcdcdc' }
+        };
+      });
+    } else {
+      setSelectedCountry(null);
+      setEditingCountry(null);
+      setEditMode(null);
+    }
+  }, [editMode]);
 
   const onDblClick = useCallback((e: MapLayerMouseEvent) => {
     e.preventDefault();
@@ -100,16 +103,23 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
   }, [selectedCountry]);
 
   const handleSave = useCallback(async () => {
+    const editsToSave = Object.fromEntries(
+      Object.entries(countryEdits).map(([name, data]) => [
+        name,
+        { ...data, geometry: data.geometry ?? null }
+      ])
+    );
+    
     if (currentWorldId) {
       await api.updateWorld(currentWorldId, {
         name: currentWorldName!,
-        edits: countryEdits
+        edits: editsToSave
       });
       alert('World saved!');
     } else {
       const name = prompt('Name your world:');
       if (!name) return;
-      const created = await api.createWorld({ name, edits: countryEdits });
+      const created = await api.createWorld({ name, edits: editsToSave });
       setCurrentWorldId(created.id!);
       setCurrentWorldName(created.name);
       alert('World saved!');
@@ -161,7 +171,9 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
           const name = feature.properties?.name;
           if (name === editingCountry) return;
 
-          const otherGeometry = countryEdits[name]?.geometry ?? feature.geometry;
+          const otherGeometry = countryEdits[name]?.geometry || feature.geometry;
+          if (!otherGeometry) return;
+          if (countryEdits[name]?.geometry === null) return;
           const otherFeature = turf.feature(otherGeometry);
 
           try {
@@ -171,8 +183,10 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
             const difference = turf.difference(turf.featureCollection([otherFeature as any, newGeometry as any]));
 
             if (!difference) {
-              const { [name]: _, ...rest } = updatedEdits;
-              Object.assign(updatedEdits, rest);
+              updatedEdits[name] = {
+                ...updatedEdits[name] ?? { name, color: '#dcdcdc' },
+                geometry: null
+              };
             } else {
               updatedEdits[name] = {
                 ...updatedEdits[name] ?? { name, color: '#dcdcdc' },
@@ -209,7 +223,12 @@ const onClick = useCallback((e: MapLayerMouseEvent) => {
   const modifiedGeoJSON = {
     ...countriesData,
     features: countriesData.features
-      .filter((feature: any) => feature.properties?.name !== editingCountry)
+      .filter((feature: any) => {
+        const name = feature.properties?.name;
+        const edit = countryEdits[name];
+        if (!edit) return true;
+        return edit.geometry !== null;
+      })
       .map((feature: any) => {
         const name = feature.properties?.name;
         const edit = countryEdits[name];
