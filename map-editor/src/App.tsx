@@ -33,6 +33,26 @@ function bboxesOverlap(a: number[], b: number[]) {
   return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
 }
 
+function getAbsorptionCandidates(countryEdits: Record<string, CountryData>) {
+  const candidates: { name: string; geometry: any }[] = [];
+  const seen = new Set<string>();
+
+  countriesData.features.forEach((feature: any) => {
+    const name = feature.properties?.name;
+    seen.add(name);
+    if (countryEdits[name]?.geometry === null) return;
+    candidates.push({ name, geometry: countryEdits[name]?.geometry ?? feature.geometry });
+  });
+
+  Object.entries(countryEdits).forEach(([name, data]) => {
+    if (seen.has(name)) return;
+    if (data.geometry === null || data.geometry === undefined) return;
+    candidates.push({ name, geometry: data.geometry });
+  });
+
+  return candidates;
+}
+
 function withUpdatedRing(
   geometry: any,
   polygonIndex: number,
@@ -120,6 +140,12 @@ function App() {
 
   const onClick = useCallback((e: MapLayerMouseEvent) => {
     if (e.originalEvent.detail === 2) return;
+    
+    const clickedVertex = e.features?.find(
+      (f) => f.layer?.id === 'vertices-layer' || f.layer?.id === 'new-vertices-layer'
+    );
+    if (clickedVertex) return;
+
     if (isAddingCountry) {
       const { lngLat } = e;
       setNewCountryPoints(prev => [...prev, [lngLat.lng, lngLat.lat]]);
@@ -223,14 +249,9 @@ function App() {
       if (!allowOverlapping) {
         const newFeature = turf.feature(newGeometry);
         const newBbox = turf.bbox(newFeature);
+        const countriesToAbsorb: string[] = [];
 
-        countriesData.features.forEach((feature: any) => {
-          const countryName = feature.properties?.name;
-          if (countryEdits[countryName]?.geometry === null) return;
-
-          const otherGeometry = countryEdits[countryName]?.geometry || feature.geometry;
-          if (!otherGeometry) return;
-
+        getAbsorptionCandidates(countryEdits).forEach(({ name: countryName, geometry: otherGeometry }) => {
           const otherBbox = turf.bbox(otherGeometry);
           if (!bboxesOverlap(newBbox, otherBbox)) return;
 
@@ -243,10 +264,7 @@ function App() {
             const difference = turf.difference(turf.featureCollection([otherFeature as any, newFeature as any]));
 
             if (!difference) {
-              updatedEdits[countryName] = {
-                ...updatedEdits[countryName] ?? { name: countryName, color: '#dcdcdc' },
-                geometry: null
-              };
+              countriesToAbsorb.push(updatedEdits[countryName]?.name ?? countryName);
             } else {
               updatedEdits[countryName] = {
                 ...updatedEdits[countryName] ?? { name: countryName, color: '#dcdcdc' },
@@ -257,6 +275,19 @@ function App() {
             return;
           }
         });
+
+        if (countriesToAbsorb.length > 0) {
+          const confirmed = window.confirm(
+            `This action will completely absorb the following countries:\n\n${countriesToAbsorb.join('\n')}\n\nContinue?`
+          );
+          if (!confirmed) return;
+          countriesToAbsorb.forEach(absorbedName => {
+            updatedEdits[absorbedName] = {
+              ...updatedEdits[absorbedName] ?? { name: absorbedName, color: '#dcdcdc' },
+              geometry: null
+            };
+          });
+        }
       }
 
       updatedEdits[name] = {
@@ -362,13 +393,8 @@ function App() {
         const updatedEdits = { ...countryEdits };
         const countriesToAbsorb: string[] = [];
 
-        countriesData.features.forEach((feature: any) => {
-          const name = feature.properties?.name;
+        getAbsorptionCandidates(countryEdits).forEach(({ name, geometry: otherGeometry }) => {
           if (name === editingCountry) return;
-          if (countryEdits[name]?.geometry === null) return;
-
-          const otherGeometry = countryEdits[name]?.geometry || feature.geometry;
-          if (!otherGeometry) return;
 
           const otherBbox = turf.bbox(otherGeometry);
           if (!bboxesOverlap(newBbox, otherBbox)) return;
@@ -576,14 +602,17 @@ function App() {
     };
   }, [isAddingCountry, newCountryPoints]);
 
-  const customCountriesData = useMemo(() => ({
+  const allCountriesData = useMemo(() => ({
     type: 'FeatureCollection' as const,
-    features: newCountries.map(([name, data]) => ({
-      type: 'Feature' as const,
-      properties: { name, ...(data.properties || {}), customColor: data.color },
-      geometry: data.geometry
-    }))
-  }), [newCountries]);
+    features: [
+      ...modifiedGeoJSON.features,
+      ...newCountries.map(([name, data]) => ({
+        type: 'Feature' as const,
+        properties: { name, ...(data.properties || {}), customColor: data.color },
+        geometry: data.geometry
+      }))
+    ]
+  }), [modifiedGeoJSON, newCountries]);
 
   const onVertexMouseDown = useCallback((e: MapLayerMouseEvent, feature: VertexFeature) => {
     e.preventDefault();
@@ -682,6 +711,13 @@ function App() {
     setDrawingPoints(prev => prev.filter((_, i) => i !== vertexIndex));
   }, []);
 
+  const handleDeleteNewCountryVertex = useCallback((vertexIndex: number) => {
+    setNewCountryPoints(prev => {
+      if (prev.length <= 3) return prev;
+      return prev.filter((_, i) => i !== vertexIndex);
+    });
+  }, []);
+
   return (
     <div
       style={{ width: '100vw', height: '100vh' }}
@@ -690,14 +726,22 @@ function App() {
         if (!mapRef.current) return;
 
         const map = mapRef.current.getMap();
-        const rect = (e.target as HTMLElement).getBoundingClientRect();
+        const rect = map.getContainer().getBoundingClientRect();
         const point = new maplibregl.Point(
           e.clientX - rect.left,
           e.clientY - rect.top
         );
 
-        const renderedFeatures = map.queryRenderedFeatures(point, {
-          layers: ['vertices-layer']
+        const candidateLayers = ['vertices-layer', 'new-vertices-layer'].filter(id => map.getLayer(id));
+        if (candidateLayers.length === 0) return;
+        
+        const bbox: [[number, number], [number, number]] = [
+          [point.x - 8, point.y - 8],
+          [point.x + 8, point.y + 8]
+        ];
+
+        const renderedFeatures = map.queryRenderedFeatures(bbox, {
+          layers: candidateLayers
         });
 
         if (renderedFeatures.length === 0) return;
@@ -706,6 +750,7 @@ function App() {
         let closestDistance = Infinity;
 
         renderedFeatures.forEach(f => {
+          if (f.geometry.type !== 'Point') return;
           const coords = (f.geometry as any).coordinates;
           const projected = map.project(coords);
           const dx = projected.x - point.x;
@@ -719,7 +764,9 @@ function App() {
 
         if (closestDistance > 12) return;
 
-        if (!closestFeature.properties?.isDrawingPoint) {
+        if (closestFeature.layer?.id === 'new-vertices-layer') {
+          handleDeleteNewCountryVertex(closestFeature.properties?.index);
+        } else if (!closestFeature.properties?.isDrawingPoint) {
           handleDeleteVertex(
             closestFeature.properties?.polygonIndex,
             closestFeature.properties?.ringIndex,
@@ -752,14 +799,16 @@ function App() {
         initialViewState={{ longitude: 0, latitude: 20, zoom: 1.5 }}
         style={{ width: '100%', height: '100%' }}
         mapStyle={BlankWorldMap}
-        interactiveLayerIds={['countries-fill', 'vertices-layer', 'editing-country-border', 'custom-countries-fill', 'new-vertices-layer']}
+        interactiveLayerIds={['countries-fill', 'vertices-layer', 'editing-country-border', 'new-vertices-layer']}
         onMouseMove={onMouseMoveWithDrag}
         onMouseLeave={onMouseLeave}
         onDblClick={onDblClick}
         doubleClickZoom={false}
         onClick={onClick}
         onMouseUp={onMouseUp}
+        dragRotate={false}
         onMouseDown={(e) => {
+          if (e.originalEvent.button !== 0) return;
           const vertexFeature = e.features?.find(
             (f) => f.layer?.id === 'vertices-layer' || f.layer?.id === 'new-vertices-layer'
           );
@@ -769,7 +818,7 @@ function App() {
         }}
         ref={mapRef}
       >
-        <Source id="countries" type="geojson" data={modifiedGeoJSON}>
+        <Source id="countries" type="geojson" data={allCountriesData}>
           <Layer
             id="countries-fill"
             type="fill"
@@ -829,10 +878,8 @@ function App() {
                   'interpolate',
                   ['linear'],
                   ['zoom'],
-                  2, 0,
-                  3, 1,
-                  4, 2,
-                  5, 4,
+                  1, 4,
+                  5, 5,
                   8, 8,
                   12, 12
                 ],
@@ -874,41 +921,14 @@ function App() {
                   'interpolate',
                   ['linear'],
                   ['zoom'],
-                  2, 0,
-                  3, 1,
-                  4, 2,
-                  5, 4,
+                  1, 4,
+                  5, 5,
                   8, 8,
                   12, 12
                 ],
                 'circle-color': '#ffffff',
                 'circle-stroke-width': 2,
                 'circle-stroke-color': '#4f46e5'
-              }}
-            />
-          </Source>
-        )}
-        {newCountries.length > 0 && (
-          <Source id="custom-countries" type="geojson" data={customCountriesData}>
-            <Layer
-              id="custom-countries-fill"
-              type="fill"
-              paint={{
-                'fill-color': [
-                  'case',
-                  ['==', ['get', 'name'], selectedCountry], '#613e00',
-                  ['==', ['get', 'name'], hoveredCountry], '#031a34',
-                  ['get', 'customColor']
-                ],
-                'fill-opacity': 0.5
-              }}
-            />
-            <Layer
-              id="custom-countries-border"
-              type="line"
-              paint={{
-                'line-color': '#1a1a2e',
-                'line-width': 1
               }}
             />
           </Source>
