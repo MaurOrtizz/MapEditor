@@ -1,8 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
-import Map, { Source, Layer } from 'react-map-gl/maplibre';
-import { useRef } from 'react';
-import type { MapLayerMouseEvent, MapRef} from 'react-map-gl/maplibre';
+import MapGL, { Source, Layer } from 'react-map-gl/maplibre';
+import type { MapLayerMouseEvent, MapRef } from 'react-map-gl/maplibre';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import countriesRaw from './data/countries_mid_res.geojson?raw';
 import BlankWorldMapJson from './data/BlankWorldMap.json'
@@ -11,16 +10,66 @@ import { api, type WorldData } from './api';
 import Navbar from './components/Navbar';
 import CountryPanel from './components/CountryPanel';
 import WorldsPanel from './components/WorldsPanel';
+import Sidebar from './components/Sidebar';
 import * as turf from '@turf/turf';
 
 interface CountryData {
   name: string;
   color: string;
   geometry?: any;
+  properties?: Record<string, any>;
 }
+
+type VertexFeature = NonNullable<MapLayerMouseEvent['features']>[number];
 
 const BlankWorldMap = BlankWorldMapJson as unknown as StyleSpecification;
 const countriesData = JSON.parse(countriesRaw);
+
+const countriesByName = new Map<string, any>(
+  countriesData.features.map((f: any) => [f.properties?.name, f])
+);
+
+function bboxesOverlap(a: number[], b: number[]) {
+  return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
+}
+
+function withUpdatedRing(
+  geometry: any,
+  polygonIndex: number,
+  ringIndex: number,
+  updateRing: (ring: number[][]) => number[][]
+) {
+  if (geometry.type === 'Polygon') {
+    return {
+      ...geometry,
+      coordinates: geometry.coordinates.map((ring: number[][], i: number) =>
+        i === ringIndex ? updateRing(ring) : ring
+      )
+    };
+  }
+  if (geometry.type === 'MultiPolygon') {
+    return {
+      ...geometry,
+      coordinates: geometry.coordinates.map((polygon: number[][][], pi: number) =>
+        pi === polygonIndex
+          ? polygon.map((ring: number[][], ri: number) => (ri === ringIndex ? updateRing(ring) : ring))
+          : polygon
+      )
+    };
+  }
+  return geometry;
+}
+
+function moveRingVertex(ring: number[][], vertexIndex: number, newCoord: number[]) {
+  const newRing = [...ring];
+  newRing[vertexIndex] = newCoord;
+  if (vertexIndex === 0) {
+    newRing[newRing.length - 1] = newCoord;
+  } else if (vertexIndex === newRing.length - 1) {
+    newRing[0] = newCoord;
+  }
+  return newRing;
+}
 
 function App() {
   const [hoveredCountry, setHoveredCountry] = useState<string | null>(null);
@@ -35,26 +84,47 @@ function App() {
   const [editMode, setEditMode] = useState<'vertices' | 'draw' | null>(null);
   const mapRef = useRef<MapRef>(null);
   const [drawingPoints, setDrawingPoints] = useState<number[][]>([]);
-const [draggingVertex, setDraggingVertex] = useState<{ 
-  index: number; 
-  polygonIndex: number; 
-  ringIndex: number;
-  vertexIndex: number;
-  isDrawingPoint: boolean;
-} | null>(null);
+  const [isAddingCountry, setIsAddingCountry] = useState(false);
+  const [newCountryPoints, setNewCountryPoints] = useState<number[][]>([]);
+  const [draggingVertex, setDraggingVertex] = useState<{
+    index: number;
+    polygonIndex: number;
+    ringIndex: number;
+    vertexIndex: number;
+    isDrawingPoint: boolean;
+    isNewCountryVertex?: boolean;
+  } | null>(null);
 
   const handleSetEditMode = useCallback((mode: 'vertices' | 'draw' | null) => {
     setEditMode(mode);
-    if (mode !== 'draw') {
-      setDrawingPoints([]);
-    }
+    setDrawingPoints([]);
+    setNewCountryPoints([]);
+    setIsAddingCountry(false);
   }, []);
 
   const onMouseLeave = useCallback(() => {
     setHoveredCountry(null);
   }, []);
 
+  const newCountries = useMemo(
+    () =>
+      Object.entries(countryEdits).filter(
+        ([name, data]) =>
+          data.geometry !== null &&
+          data.geometry !== undefined &&
+          !countriesByName.has(name) &&
+          name !== editingCountry
+      ),
+    [countryEdits, editingCountry]
+  );
+
   const onClick = useCallback((e: MapLayerMouseEvent) => {
+    if (e.originalEvent.detail === 2) return;
+    if (isAddingCountry) {
+      const { lngLat } = e;
+      setNewCountryPoints(prev => [...prev, [lngLat.lng, lngLat.lat]]);
+      return;
+    }
     if (editMode === 'draw') {
       const { lngLat } = e;
       setDrawingPoints(prev => [...prev, [lngLat.lng, lngLat.lat]]);
@@ -65,59 +135,57 @@ const [draggingVertex, setDraggingVertex] = useState<{
       if (!editingCountry) return;
 
       const clickPoint = turf.point([e.lngLat.lng, e.lngLat.lat]);
-
-      const originalFeature = countriesData.features.find(
-        (f: any) => f.properties?.name === editingCountry
-      );
+      const originalFeature = countriesByName.get(editingCountry);
       const base = editedGeometries[editingCountry] ?? originalFeature.geometry;
-      const geometry = JSON.parse(JSON.stringify(base));
 
-      if (geometry.type === 'Polygon') {
-        let closestRingIndex = 0;
-        let closestDistance = Infinity;
-        
-        geometry.coordinates.forEach((ring: number[][], ringIndex: number) => {
+      if (base.type === 'Polygon') {
+        let bestRingIndex = 0;
+        let bestSegmentIndex = 0;
+        let bestDistance = Infinity;
+
+        base.coordinates.forEach((ring: number[][], ringIndex: number) => {
           const line = turf.lineString(ring);
           const nearest = turf.nearestPointOnLine(line, clickPoint);
-          if (nearest.properties.dist < closestDistance) {
-            closestDistance = nearest.properties.dist;
-            closestRingIndex = ringIndex;
+          if (nearest.properties.dist < bestDistance) {
+            bestDistance = nearest.properties.dist;
+            bestRingIndex = ringIndex;
+            bestSegmentIndex = nearest.properties.segmentIndex ?? 0;
           }
         });
 
-        const ring = geometry.coordinates[closestRingIndex];
-        const line = turf.lineString(ring);
-        const nearest = turf.nearestPointOnLine(line, clickPoint);
-        if (nearest.properties.segmentIndex !== undefined) {
-          ring.splice(nearest.properties.segmentIndex + 1, 0, [e.lngLat.lng, e.lngLat.lat]);
-        }
+        const updated = withUpdatedRing(base, 0, bestRingIndex, (ring) => {
+          const newRing = [...ring];
+          newRing.splice(bestSegmentIndex + 1, 0, [e.lngLat.lng, e.lngLat.lat]);
+          return newRing;
+        });
+        setEditedGeometries(prev => ({ ...prev, [editingCountry]: updated }));
+      } else if (base.type === 'MultiPolygon') {
+        let bestPolygonIndex = 0;
+        let bestRingIndex = 0;
+        let bestSegmentIndex = 0;
+        let bestDistance = Infinity;
 
-      } else if (geometry.type === 'MultiPolygon') {
-        let closestPolygonIndex = 0;
-        let closestRingIndex = 0;
-        let closestDistance = Infinity;
-
-        geometry.coordinates.forEach((polygon: number[][][], polygonIndex: number) => {
+        base.coordinates.forEach((polygon: number[][][], polygonIndex: number) => {
           polygon.forEach((ring: number[][], ringIndex: number) => {
             const line = turf.lineString(ring);
             const nearest = turf.nearestPointOnLine(line, clickPoint);
-            if (nearest.properties.dist < closestDistance) {
-              closestDistance = nearest.properties.dist;
-              closestPolygonIndex = polygonIndex;
-              closestRingIndex = ringIndex;
+            if (nearest.properties.dist < bestDistance) {
+              bestDistance = nearest.properties.dist;
+              bestPolygonIndex = polygonIndex;
+              bestRingIndex = ringIndex;
+              bestSegmentIndex = nearest.properties.segmentIndex ?? 0;
             }
           });
         });
 
-        const ring = geometry.coordinates[closestPolygonIndex][closestRingIndex];
-        const line = turf.lineString(ring);
-        const nearest = turf.nearestPointOnLine(line, clickPoint);
-        if (nearest.properties.segmentIndex !== undefined) {
-          ring.splice(nearest.properties.segmentIndex + 1, 0, [e.lngLat.lng, e.lngLat.lat]);
-        }
+        const updated = withUpdatedRing(base, bestPolygonIndex, bestRingIndex, (ring) => {
+          const newRing = [...ring];
+          newRing.splice(bestSegmentIndex + 1, 0, [e.lngLat.lng, e.lngLat.lat]);
+          return newRing;
+        });
+        setEditedGeometries(prev => ({ ...prev, [editingCountry]: updated }));
       }
 
-      setEditedGeometries(prev => ({ ...prev, [editingCountry]: geometry }));
       return;
     }
 
@@ -134,10 +202,76 @@ const [draggingVertex, setDraggingVertex] = useState<{
       setEditingCountry(null);
       setEditMode(null);
     }
-  }, [editMode, editingCountry, editedGeometries]);
+  }, [editMode, editingCountry, editedGeometries, isAddingCountry]);
 
   const onDblClick = useCallback((e: MapLayerMouseEvent) => {
     e.preventDefault();
+
+    if (isAddingCountry) {
+      if (newCountryPoints.length < 3) return;
+
+      const name = prompt('Name your new country:');
+      if (!name) return;
+
+      const newGeometry = {
+        type: 'Polygon' as const,
+        coordinates: [[...newCountryPoints, newCountryPoints[0]]]
+      };
+
+      const updatedEdits = { ...countryEdits };
+
+      if (!allowOverlapping) {
+        const newFeature = turf.feature(newGeometry);
+        const newBbox = turf.bbox(newFeature);
+
+        countriesData.features.forEach((feature: any) => {
+          const countryName = feature.properties?.name;
+          if (countryEdits[countryName]?.geometry === null) return;
+
+          const otherGeometry = countryEdits[countryName]?.geometry || feature.geometry;
+          if (!otherGeometry) return;
+
+          const otherBbox = turf.bbox(otherGeometry);
+          if (!bboxesOverlap(newBbox, otherBbox)) return;
+
+          const otherFeature = turf.feature(otherGeometry);
+
+          try {
+            const intersection = turf.intersect(turf.featureCollection([newFeature as any, otherFeature as any]));
+            if (!intersection) return;
+
+            const difference = turf.difference(turf.featureCollection([otherFeature as any, newFeature as any]));
+
+            if (!difference) {
+              updatedEdits[countryName] = {
+                ...updatedEdits[countryName] ?? { name: countryName, color: '#dcdcdc' },
+                geometry: null
+              };
+            } else {
+              updatedEdits[countryName] = {
+                ...updatedEdits[countryName] ?? { name: countryName, color: '#dcdcdc' },
+                geometry: difference.geometry
+              };
+            }
+          } catch {
+            return;
+          }
+        });
+      }
+
+      updatedEdits[name] = {
+        name,
+        color: '#dcdcdc',
+        geometry: newGeometry,
+        properties: {}
+      };
+
+      setCountryEdits(updatedEdits);
+      setIsAddingCountry(false);
+      setNewCountryPoints([]);
+      return;
+    }
+
     const feature = e.features?.[0];
     if (feature) {
       const name = feature.properties?.name;
@@ -147,15 +281,16 @@ const [draggingVertex, setDraggingVertex] = useState<{
         ...prev,
         [name]: prev[name] ?? { name, color: '#dcdcdc' }
       }));
-      const savedGeometry = countryEdits[name]?.geometry;
-      const originalFeature = countriesData.features.find((f: any) => f.properties?.name === name);
+      const isNewCountry = !countriesByName.has(name);
+      const geometry = isNewCountry
+        ? countryEdits[name]?.geometry
+        : countryEdits[name]?.geometry ?? countriesByName.get(name)?.geometry;
       setEditedGeometries(prev => ({
         ...prev,
-        [name]: savedGeometry ?? originalFeature?.geometry
+        [name]: geometry
       }));
     }
-  }, [countryEdits]);
-
+  }, [isAddingCountry, newCountryPoints, countryEdits, allowOverlapping]);
 
   const handlePanelChange = useCallback((data: CountryData) => {
     if (!selectedCountry) return;
@@ -169,7 +304,7 @@ const [draggingVertex, setDraggingVertex] = useState<{
         { ...data, geometry: data.geometry ?? null }
       ])
     );
-    
+
     if (currentWorldId) {
       await api.updateWorld(currentWorldId, {
         name: currentWorldName!,
@@ -208,11 +343,9 @@ const [draggingVertex, setDraggingVertex] = useState<{
     let geometry = editedGeometries[editingCountry];
 
     if (drawingPoints.length >= 3) {
-      const originalFeature = countriesData.features.find(
-        (f: any) => f.properties?.name === editingCountry
-      );
-      const baseGeometry = geometry 
-        ?? countryEdits[editingCountry]?.geometry 
+      const originalFeature = countriesByName.get(editingCountry);
+      const baseGeometry = geometry
+        ?? countryEdits[editingCountry]?.geometry
         ?? originalFeature.geometry;
 
       const drawnPolygon = turf.polygon([[...drawingPoints, drawingPoints[0]]]);
@@ -225,6 +358,7 @@ const [draggingVertex, setDraggingVertex] = useState<{
       const newGeometry = turf.feature(geometry);
 
       if (!allowOverlapping) {
+        const newBbox = turf.bbox(newGeometry);
         const updatedEdits = { ...countryEdits };
         const countriesToAbsorb: string[] = [];
 
@@ -235,6 +369,10 @@ const [draggingVertex, setDraggingVertex] = useState<{
 
           const otherGeometry = countryEdits[name]?.geometry || feature.geometry;
           if (!otherGeometry) return;
+
+          const otherBbox = turf.bbox(otherGeometry);
+          if (!bboxesOverlap(newBbox, otherBbox)) return;
+
           const otherFeature = turf.feature(otherGeometry);
 
           try {
@@ -290,8 +428,8 @@ const [draggingVertex, setDraggingVertex] = useState<{
     setEditMode(null);
     setDrawingPoints([]);
   }, [editingCountry, editedGeometries, drawingPoints, countryEdits, allowOverlapping]);
-    
-  const modifiedGeoJSON = {
+
+  const modifiedGeoJSON = useMemo(() => ({
     ...countriesData,
     features: countriesData.features
       .filter((feature: any) => {
@@ -308,20 +446,22 @@ const [draggingVertex, setDraggingVertex] = useState<{
           geometry: edit?.geometry ?? feature.geometry,
           properties: {
             ...feature.properties,
+            ...(edit?.properties || {}),
             customColor: edit?.color ?? '#dcdcdc'
           }
         };
       })
-  };
+  }), [countryEdits]);
 
-  const { editingVertices } = (() => {
-    if (!editingCountry) return { editingVertices: null };
+  const editingVertices = useMemo(() => {
+    if (!editingCountry) return null;
 
-    const feature = editedGeometries[editingCountry] 
+    const feature = editedGeometries[editingCountry]
       ? { geometry: editedGeometries[editingCountry] }
-      : countriesData.features.find((f: any) => f.properties?.name === editingCountry);
-    
-    if (!feature) return { editingVertices: null };
+      : countriesByName.get(editingCountry)
+      ?? (countryEdits[editingCountry]?.geometry ? { geometry: countryEdits[editingCountry].geometry } : null);
+
+    if (!feature) return null;
 
     const allCoords: { coord: number[]; polygonIndex: number; ringIndex: number; vertexIndex: number }[] = [];
 
@@ -343,10 +483,15 @@ const [draggingVertex, setDraggingVertex] = useState<{
       }
     }
 
-    const editingVertices = allCoords.length > 0 || drawingPoints.length > 0 ? {
+    const shouldShowVertexMarkers = editMode === 'vertices' && allCoords.length > 0;
+    const shouldShowDrawingPoints = editMode === 'draw' && drawingPoints.length > 0;
+
+    if (!shouldShowVertexMarkers && !shouldShowDrawingPoints) return null;
+
+    return {
       type: 'FeatureCollection' as const,
       features: [
-        ...allCoords.map((item, index) => ({
+        ...(shouldShowVertexMarkers ? allCoords.map((item, index) => ({
           type: 'Feature' as const,
           properties: {
             index,
@@ -359,8 +504,8 @@ const [draggingVertex, setDraggingVertex] = useState<{
             type: 'Point' as const,
             coordinates: item.coord
           }
-        })),
-        ...drawingPoints.map((coord, index) => ({
+        })) : []),
+        ...(shouldShowDrawingPoints ? drawingPoints.map((coord, index) => ({
           type: 'Feature' as const,
           properties: {
             index: allCoords.length + index,
@@ -373,16 +518,88 @@ const [draggingVertex, setDraggingVertex] = useState<{
             type: 'Point' as const,
             coordinates: coord
           }
+        })) : [])
+      ]
+    };
+  }, [editingCountry, editedGeometries, countryEdits, editMode, drawingPoints]);
+
+  const editingCountryData = useMemo(() => {
+    if (!editingCountry) return null;
+
+    const base = editedGeometries[editingCountry] ?? countriesByName.get(editingCountry)?.geometry;
+    if (!base) return null;
+
+    let geometry = base;
+    if (drawingPoints.length >= 3) {
+      try {
+        const drawnPolygon = turf.polygon([[...drawingPoints, drawingPoints[0]]]);
+        const basePolygon = turf.feature(base);
+        const unioned = turf.union(turf.featureCollection([basePolygon as any, drawnPolygon]));
+        if (unioned) geometry = unioned.geometry;
+      } catch {
+        geometry = base;
+      }
+    }
+
+    return {
+      type: 'FeatureCollection' as const,
+      features: [{
+        type: 'Feature' as const,
+        properties: {
+          name: editingCountry,
+          customColor: countryEdits[editingCountry]?.color ?? '#dcdcdc'
+        },
+        geometry
+      }]
+    };
+  }, [editingCountry, editedGeometries, drawingPoints, countryEdits]);
+
+  const newCountryData = useMemo(() => {
+    if (!isAddingCountry || newCountryPoints.length === 0) return null;
+
+    return {
+      type: 'FeatureCollection' as const,
+      features: [
+        {
+          type: 'Feature' as const,
+          properties: { isShape: true },
+          geometry: newCountryPoints.length >= 3
+            ? { type: 'Polygon' as const, coordinates: [[...newCountryPoints, newCountryPoints[0]]] }
+            : { type: 'LineString' as const, coordinates: newCountryPoints }
+        },
+        ...newCountryPoints.map((coord, index) => ({
+          type: 'Feature' as const,
+          properties: { isVertex: true, index },
+          geometry: { type: 'Point' as const, coordinates: coord }
         }))
       ]
-    } : null;
-    return { editingVertices };
-  })();
+    };
+  }, [isAddingCountry, newCountryPoints]);
 
-  const onVertexMouseDown = useCallback((e: MapLayerMouseEvent) => {
-    const feature = e.features?.[0];
-    if (!feature) return;
+  const customCountriesData = useMemo(() => ({
+    type: 'FeatureCollection' as const,
+    features: newCountries.map(([name, data]) => ({
+      type: 'Feature' as const,
+      properties: { name, ...(data.properties || {}), customColor: data.color },
+      geometry: data.geometry
+    }))
+  }), [newCountries]);
+
+  const onVertexMouseDown = useCallback((e: MapLayerMouseEvent, feature: VertexFeature) => {
     e.preventDefault();
+
+    if (feature.layer.id === 'new-vertices-layer') {
+      setDraggingVertex({
+        index: feature.properties?.index,
+        polygonIndex: -1,
+        ringIndex: -1,
+        vertexIndex: feature.properties?.index,
+        isDrawingPoint: false,
+        isNewCountryVertex: true
+      });
+      return;
+    }
+
     setDraggingVertex({
       index: feature.properties?.index,
       polygonIndex: feature.properties?.polygonIndex,
@@ -393,6 +610,16 @@ const [draggingVertex, setDraggingVertex] = useState<{
   }, []);
 
   const onMouseMoveWithDrag = useCallback((e: MapLayerMouseEvent) => {
+    if (draggingVertex?.isNewCountryVertex) {
+      const { lngLat } = e;
+      setNewCountryPoints(prev => {
+        const updated = [...prev];
+        updated[draggingVertex.index] = [lngLat.lng, lngLat.lat];
+        return updated;
+      });
+      return;
+    }
+
     const feature = e.features?.[0];
     if (!draggingVertex || !editingCountry) {
       setHoveredCountry(feature ? feature.properties?.name : null);
@@ -412,31 +639,15 @@ const [draggingVertex, setDraggingVertex] = useState<{
     }
 
     setEditedGeometries(prev => {
-      const originalFeature = countriesData.features.find(
-        (f: any) => f.properties?.name === editingCountry
-      );
+      const originalFeature = countriesByName.get(editingCountry);
       const base = prev[editingCountry] ?? originalFeature.geometry;
-      const geometry = JSON.parse(JSON.stringify(base));
-
-      if (geometry.type === 'Polygon') {
-        const ring = geometry.coordinates[draggingVertex.ringIndex];
-        ring[draggingVertex.vertexIndex] = newCoord;
-        if (draggingVertex.vertexIndex === 0) {
-          ring[ring.length - 1] = newCoord;
-        } else if (draggingVertex.vertexIndex === ring.length - 1) {
-          ring[0] = newCoord;
-        }
-      } else if (geometry.type === 'MultiPolygon') {
-        const ring = geometry.coordinates[draggingVertex.polygonIndex][draggingVertex.ringIndex];
-        ring[draggingVertex.vertexIndex] = newCoord;
-        if (draggingVertex.vertexIndex === 0) {
-          ring[ring.length - 1] = newCoord;
-        } else if (draggingVertex.vertexIndex === ring.length - 1) {
-          ring[0] = newCoord;
-        }
-      }
-
-      return { ...prev, [editingCountry]: geometry };
+      const updated = withUpdatedRing(
+        base,
+        draggingVertex.polygonIndex,
+        draggingVertex.ringIndex,
+        (ring) => moveRingVertex(ring, draggingVertex.vertexIndex, newCoord)
+      );
+      return { ...prev, [editingCountry]: updated };
     });
   }, [draggingVertex, editingCountry]);
 
@@ -448,25 +659,22 @@ const [draggingVertex, setDraggingVertex] = useState<{
     if (!editingCountry) return;
 
     setEditedGeometries(prev => {
-      const originalFeature = countriesData.features.find(
-        (f: any) => f.properties?.name === editingCountry
-      );
+      const originalFeature = countriesByName.get(editingCountry);
       const base = prev[editingCountry] ?? originalFeature.geometry;
-      const geometry = JSON.parse(JSON.stringify(base));
 
-      if (geometry.type === 'Polygon') {
-        const ring = geometry.coordinates[ringIndex];
-        if (ring.length <= 4) return prev;
-        ring.splice(vertexIndex, 1);
-        ring[ring.length - 1] = ring[0];
-      } else if (geometry.type === 'MultiPolygon') {
-        const ring = geometry.coordinates[polygonIndex][ringIndex];
-        if (ring.length <= 4) return prev;
-        ring.splice(vertexIndex, 1);
-        ring[ring.length - 1] = ring[0];
-      }
+      const targetRing = base.type === 'Polygon'
+        ? base.coordinates[ringIndex]
+        : base.coordinates[polygonIndex][ringIndex];
+      if (targetRing.length <= 4) return prev;
 
-      return { ...prev, [editingCountry]: geometry };
+      const updated = withUpdatedRing(base, polygonIndex, ringIndex, (ring) => {
+        const newRing = [...ring];
+        newRing.splice(vertexIndex, 1);
+        newRing[newRing.length - 1] = newRing[0];
+        return newRing;
+      });
+
+      return { ...prev, [editingCountry]: updated };
     });
   }, [editingCountry]);
 
@@ -475,23 +683,23 @@ const [draggingVertex, setDraggingVertex] = useState<{
   }, []);
 
   return (
-    <div 
-      style={{ width: '100vw', height: '100vh' }}   
+    <div
+      style={{ width: '100vw', height: '100vh' }}
       onContextMenu={(e) => {
         e.preventDefault();
         if (!mapRef.current) return;
-        
+
         const map = mapRef.current.getMap();
         const rect = (e.target as HTMLElement).getBoundingClientRect();
         const point = new maplibregl.Point(
           e.clientX - rect.left,
           e.clientY - rect.top
         );
-        
+
         const renderedFeatures = map.queryRenderedFeatures(point, {
           layers: ['vertices-layer']
         });
-        
+
         if (renderedFeatures.length === 0) return;
 
         let closestFeature = renderedFeatures[0];
@@ -531,11 +739,20 @@ const [draggingVertex, setDraggingVertex] = useState<{
         allowOverlapping={allowOverlapping}
         onToggleOverlapping={() => setAllowOverlapping(prev => !prev)}
       />
-      <Map
+      <Sidebar
+        isAddingCountry={isAddingCountry}
+        onToggleAddCountry={() => {
+          setIsAddingCountry(prev => !prev);
+          setNewCountryPoints([]);
+          setDrawingPoints([]);
+          setEditMode(null);
+        }}
+      />
+      <MapGL
         initialViewState={{ longitude: 0, latitude: 20, zoom: 1.5 }}
         style={{ width: '100%', height: '100%' }}
         mapStyle={BlankWorldMap}
-        interactiveLayerIds={['countries-fill', 'vertices-layer', 'editing-country-border']}
+        interactiveLayerIds={['countries-fill', 'vertices-layer', 'editing-country-border', 'custom-countries-fill', 'new-vertices-layer']}
         onMouseMove={onMouseMoveWithDrag}
         onMouseLeave={onMouseLeave}
         onDblClick={onDblClick}
@@ -543,8 +760,11 @@ const [draggingVertex, setDraggingVertex] = useState<{
         onClick={onClick}
         onMouseUp={onMouseUp}
         onMouseDown={(e) => {
-          if (e.features?.[0]?.layer?.id === 'vertices-layer') {
-            onVertexMouseDown(e);
+          const vertexFeature = e.features?.find(
+            (f) => f.layer?.id === 'vertices-layer' || f.layer?.id === 'new-vertices-layer'
+          );
+          if (vertexFeature) {
+            onVertexMouseDown(e, vertexFeature);
           }
         }}
         ref={mapRef}
@@ -572,61 +792,8 @@ const [draggingVertex, setDraggingVertex] = useState<{
             }}
           />
         </Source>
-        {editingVertices && (
-          <Source id="vertices" type="geojson" data={editingVertices}>
-            <Layer
-              id="vertices-layer"
-              type="circle"
-              paint={{
-                'circle-radius': [
-                  'interpolate',
-                  ['linear'],
-                  ['zoom'],
-                  2, 0,
-                  3, 1,
-                  4, 2,
-                  5, 4,
-                  8, 8,
-                  12, 12
-                ],
-                'circle-color': '#ffffff',
-                'circle-stroke-width': 2,
-                'circle-stroke-color': '#4f46e5'
-              }}
-            />
-          </Source>
-        )}
-        {editingCountry && (
-          <Source
-            id="editing-country"
-            type="geojson"
-            data={{
-              type: 'FeatureCollection' as const,
-              features: [{
-                type: 'Feature' as const,
-                properties: { 
-                  name: editingCountry,
-                  customColor: countryEdits[editingCountry]?.color ?? '#dcdcdc'
-                },
-                geometry: (() => {
-                  const base = editedGeometries[editingCountry] ?? 
-                    countriesData.features.find((f: any) => f.properties?.name === editingCountry)?.geometry;
-                  
-                  if (drawingPoints.length >= 3) {
-                    try {
-                      const drawnPolygon = turf.polygon([[...drawingPoints, drawingPoints[0]]]);
-                      const basePolygon = turf.feature(base);
-                      const unioned = turf.union(turf.featureCollection([basePolygon as any, drawnPolygon]));
-                      if (unioned) return unioned.geometry;
-                    } catch {
-                      return base;
-                    }
-                  }
-                  return base;
-                })()
-              }]
-            }}
-          >
+        {editingCountryData && (
+          <Source id="editing-country" type="geojson" data={editingCountryData}>
             <Layer
               id="editing-country-fill"
               type="fill"
@@ -652,7 +819,101 @@ const [draggingVertex, setDraggingVertex] = useState<{
             />
           </Source>
         )}
-      </Map>
+        {editingVertices && (
+          <Source id="vertices" type="geojson" data={editingVertices}>
+            <Layer
+              id="vertices-layer"
+              type="circle"
+              paint={{
+                'circle-radius': [
+                  'interpolate',
+                  ['linear'],
+                  ['zoom'],
+                  2, 0,
+                  3, 1,
+                  4, 2,
+                  5, 4,
+                  8, 8,
+                  12, 12
+                ],
+                'circle-color': '#ffffff',
+                'circle-stroke-width': 2,
+                'circle-stroke-color': '#4f46e5'
+              }}
+            />
+          </Source>
+        )}
+        {newCountryData && (
+          <Source id="new-country" type="geojson" data={newCountryData}>
+            <Layer
+              id="new-country-fill"
+              type="fill"
+              filter={['has', 'isShape']}
+              paint={{ 'fill-color': '#16a34a', 'fill-opacity': 0.6 }}
+            />
+            <Layer
+              id="new-editing-country-border"
+              type="line"
+              paint={{
+                'line-color': '#4f46e5',
+                'line-width': [
+                  'interpolate',
+                  ['linear'],
+                  ['zoom'],
+                  2, editMode === 'vertices' ? 3 : 1,
+                  6, editMode === 'vertices' ? 5 : 2,
+                  10, editMode === 'vertices' ? 8 : 2
+                ]
+              }}
+            />
+            <Layer
+              id="new-vertices-layer"
+              type="circle"
+              paint={{
+                'circle-radius': [
+                  'interpolate',
+                  ['linear'],
+                  ['zoom'],
+                  2, 0,
+                  3, 1,
+                  4, 2,
+                  5, 4,
+                  8, 8,
+                  12, 12
+                ],
+                'circle-color': '#ffffff',
+                'circle-stroke-width': 2,
+                'circle-stroke-color': '#4f46e5'
+              }}
+            />
+          </Source>
+        )}
+        {newCountries.length > 0 && (
+          <Source id="custom-countries" type="geojson" data={customCountriesData}>
+            <Layer
+              id="custom-countries-fill"
+              type="fill"
+              paint={{
+                'fill-color': [
+                  'case',
+                  ['==', ['get', 'name'], selectedCountry], '#613e00',
+                  ['==', ['get', 'name'], hoveredCountry], '#031a34',
+                  ['get', 'customColor']
+                ],
+                'fill-opacity': 0.5
+              }}
+            />
+            <Layer
+              id="custom-countries-border"
+              type="line"
+              paint={{
+                'line-color': '#1a1a2e',
+                'line-width': 1
+              }}
+            />
+          </Source>
+        )}
+      </MapGL>
 
       {showWorldsPanel && (
         <WorldsPanel
@@ -675,13 +936,14 @@ const [draggingVertex, setDraggingVertex] = useState<{
           editMode={editMode}
           onEnterEditMode={() => {
             setEditingCountry(selectedCountry);
-            const savedGeometry = countryEdits[selectedCountry]?.geometry;
-            const originalFeature = countriesData.features.find(
-              (f: any) => f.properties?.name === selectedCountry
-            );
+            const isNewCountry = !countriesByName.has(selectedCountry!);
+            const geometry = isNewCountry
+              ? countryEdits[selectedCountry!]?.geometry
+              : countryEdits[selectedCountry!]?.geometry ??
+                countriesByName.get(selectedCountry!)?.geometry;
             setEditedGeometries(prev => ({
               ...prev,
-              [selectedCountry!]: savedGeometry ?? originalFeature?.geometry
+              [selectedCountry!]: geometry
             }));
           }}
           onSetEditMode={handleSetEditMode}
