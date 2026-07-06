@@ -114,6 +114,7 @@ function App() {
     isDrawingPoint: boolean;
     isNewCountryVertex?: boolean;
   } | null>(null);
+  const [absorbingCountry, setAbsorbingCountry] = useState<string | null>(null);
 
   const handleSetEditMode = useCallback((mode: 'vertices' | 'draw' | null) => {
     setEditMode(mode);
@@ -145,6 +146,49 @@ function App() {
       (f) => f.layer?.id === 'vertices-layer' || f.layer?.id === 'new-vertices-layer'
     );
     if (clickedVertex) return;
+
+    if (absorbingCountry) {
+      const feature = e.features?.[0];
+      if (!feature) {
+        setAbsorbingCountry(null);
+        return;
+      }
+
+      const targetName = feature.properties?.name;
+      if (targetName === absorbingCountry) return;
+
+      const sourceGeometry = countryEdits[absorbingCountry]?.geometry ?? countriesByName.get(absorbingCountry)?.geometry;
+      const targetGeometry = countryEdits[targetName]?.geometry ?? countriesByName.get(targetName)?.geometry;
+      if (!sourceGeometry || !targetGeometry) return;
+
+      const confirmed = window.confirm(`Absorb ${absorbingCountry} into ${targetName}?`);
+      if (!confirmed) {
+        setAbsorbingCountry(null);
+        return;
+      }
+
+      const sourceFeature = turf.feature(sourceGeometry);
+      const targetFeature = turf.feature(targetGeometry);
+      const unioned = turf.union(turf.featureCollection([sourceFeature as any, targetFeature as any]));
+
+      setCountryEdits(prev => ({
+        ...prev,
+        [absorbingCountry]: {
+          ...prev[absorbingCountry] ?? { name: absorbingCountry, color: '#dcdcdc' },
+          geometry: null
+        },
+        [targetName]: {
+          ...prev[targetName] ?? { name: targetName, color: '#dcdcdc' },
+          geometry: unioned ? unioned.geometry : targetGeometry
+        }
+      }));
+
+      setAbsorbingCountry(null);
+      setSelectedCountry(null);
+      setEditingCountry(null);
+      setEditMode(null);
+      return;
+    }
 
     if (isAddingCountry) {
       const { lngLat } = e;
@@ -228,7 +272,7 @@ function App() {
       setEditingCountry(null);
       setEditMode(null);
     }
-  }, [editMode, editingCountry, editedGeometries, isAddingCountry]);
+  }, [editMode, editingCountry, editedGeometries, isAddingCountry, absorbingCountry, countryEdits]);
 
   const onDblClick = useCallback((e: MapLayerMouseEvent) => {
     e.preventDefault();
@@ -327,6 +371,31 @@ function App() {
     if (!selectedCountry) return;
     setCountryEdits(prev => ({ ...prev, [selectedCountry]: data }));
   }, [selectedCountry]);
+
+  const handleDeleteCountry = useCallback(() => {
+    if (!selectedCountry) return;
+    const confirmed = window.confirm(`Delete ${selectedCountry} completely?`);
+    if (!confirmed) return;
+
+    setCountryEdits(prev => ({
+      ...prev,
+      [selectedCountry]: {
+        ...prev[selectedCountry] ?? { name: selectedCountry, color: '#dcdcdc' },
+        geometry: null
+      }
+    }));
+    setSelectedCountry(null);
+    setEditingCountry(null);
+    setEditMode(null);
+  }, [selectedCountry]);
+
+  const handleStartAbsorb = useCallback(() => {
+    setAbsorbingCountry(selectedCountry);
+  }, [selectedCountry]);
+
+  const handleCancelAbsorb = useCallback(() => {
+    setAbsorbingCountry(null);
+  }, []);
 
   const handleSave = useCallback(async () => {
     const editsToSave = Object.fromEntries(
@@ -968,6 +1037,10 @@ function App() {
           }}
           onSetEditMode={handleSetEditMode}
           onDoneEditing={handleDoneEditing}
+          isAbsorbing={absorbingCountry === selectedCountry}
+          onStartAbsorb={handleStartAbsorb}
+          onCancelAbsorb={handleCancelAbsorb}
+          onDeleteCountry={handleDeleteCountry}
         />
       )}
     </div>

@@ -15,6 +15,10 @@ interface CountryPanelProps {
   onEnterEditMode: () => void;
   onSetEditMode: (mode: 'vertices' | 'draw' | null) => void;
   onDoneEditing: () => void;
+  isAbsorbing: boolean;
+  onStartAbsorb: () => void;
+  onCancelAbsorb: () => void;
+  onDeleteCountry: () => void;
 }
 
 const buttonStyle = (bg: string) => ({
@@ -29,7 +33,7 @@ const buttonStyle = (bg: string) => ({
 });
 
 
-function CountryPanel({ countryName, data, onChange, onClose, editingCountry, editMode, onEnterEditMode, onSetEditMode, onDoneEditing }: CountryPanelProps) {  
+function CountryPanel({ countryName, data, onChange, onClose, editingCountry, editMode, onEnterEditMode, onSetEditMode, onDoneEditing, isAbsorbing, onStartAbsorb, onCancelAbsorb, onDeleteCountry }: CountryPanelProps) {  
   const [localColor, setLocalColor] = useState(data.color);
 
   useEffect(() => {
@@ -86,10 +90,27 @@ function CountryPanel({ countryName, data, onChange, onClose, editingCountry, ed
         </div>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {editingCountry !== countryName ? (
-          <button onClick={onEnterEditMode} style={buttonStyle('#4f46e5')}>
-            Edit Borders
-          </button>
+        {isAbsorbing ? (
+          <>
+            <p style={{ fontSize: 13, color: '#444', margin: 0 }}>
+              Click another country on the map to absorb {countryName} into it.
+            </p>
+            <button onClick={onCancelAbsorb} style={buttonStyle('#6b7280')}>
+              Cancel
+            </button>
+          </>
+        ) : editingCountry !== countryName ? (
+          <>
+            <button onClick={onEnterEditMode} style={buttonStyle('#4f46e5')}>
+              Edit Borders
+            </button>
+            <button onClick={onStartAbsorb} style={buttonStyle('#ea580c')}>
+              Absorb Into...
+            </button>
+            <button onClick={onDeleteCountry} style={buttonStyle('#dc2626')}>
+              Delete Country
+            </button>
+          </>
         ) : (
           <>
             <button
