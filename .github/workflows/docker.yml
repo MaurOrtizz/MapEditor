@@ -1,0 +1,84 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: map-editor/package-lock.json
+
+      - name: Install dependencies
+        working-directory: map-editor
+        run: npm ci
+
+      - name: Lint
+        working-directory: map-editor
+        run: npm run lint
+
+      - name: Type-check and build
+        working-directory: map-editor
+        run: npm run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./map-editor
+          push: ${{ github.event_name == 'push' }}
+          tags: ghcr.io/${{ github.repository_owner }}/map-editor-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        working-directory: server
+        run: pip install -r requirements.txt
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          push: ${{ github.event_name == 'push' }}
+          tags: ghcr.io/${{ github.repository_owner }}/map-editor-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
