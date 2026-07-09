@@ -12,6 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set lowercase repository owner
+        run: echo "REPO_OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -46,7 +49,7 @@ jobs:
         with:
           context: ./map-editor
           push: ${{ github.event_name == 'push' }}
-          tags: ghcr.io/${{ github.repository_owner }}/map-editor-frontend:latest
+          tags: ghcr.io/${{ env.REPO_OWNER }}/map-editor-frontend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -54,6 +57,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set lowercase repository owner
+        run: echo "REPO_OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
       - uses: actions/setup-python@v5
         with:
@@ -79,6 +85,6 @@ jobs:
         with:
           context: ./server
           push: ${{ github.event_name == 'push' }}
-          tags: ghcr.io/${{ github.repository_owner }}/map-editor-backend:latest
+          tags: ghcr.io/${{ env.REPO_OWNER }}/map-editor-frontend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

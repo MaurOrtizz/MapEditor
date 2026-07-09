@@ -1,9 +1,11 @@
+import type { Geometry, GeoJsonProperties } from 'geojson';
+
 const BASE_URL = import.meta.env.VITE_API_URL;
 
 export interface WorldData {
   id?: number;
   name: string;
-  edits: Record<string, { name: string; color: string; geometry?: any }>;
+  edits: Record<string, { name: string; color: string; geometry?: Geometry | null; properties?: GeoJsonProperties }>;
 }
 
 export const api = {

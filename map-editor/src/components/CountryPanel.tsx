@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
 interface CountryData {
   name: string;
@@ -35,10 +35,12 @@ const buttonStyle = (bg: string) => ({
 
 function CountryPanel({ countryName, data, onChange, onClose, editingCountry, editMode, onEnterEditMode, onSetEditMode, onDoneEditing, isAbsorbing, onStartAbsorb, onCancelAbsorb, onDeleteCountry }: CountryPanelProps) {  
   const [localColor, setLocalColor] = useState(data.color);
+  const [renderedCountryName, setRenderedCountryName] = useState(countryName);
 
-  useEffect(() => {
+  if (countryName !== renderedCountryName) {
+    setRenderedCountryName(countryName);
     setLocalColor(data.color);
-  }, [countryName]);
+  }
 
   return (
     <div style={{

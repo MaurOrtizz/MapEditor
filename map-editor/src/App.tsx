@@ -12,21 +12,22 @@ import CountryPanel from './components/CountryPanel';
 import WorldsPanel from './components/WorldsPanel';
 import Sidebar from './components/Sidebar';
 import * as turf from '@turf/turf';
+import type { Feature, FeatureCollection, Geometry, Polygon, MultiPolygon, GeoJsonProperties, Position } from 'geojson';
 
 interface CountryData {
   name: string;
   color: string;
-  geometry?: any;
-  properties?: Record<string, any>;
+  geometry?: Geometry | null;
+  properties?: GeoJsonProperties;
 }
 
 type VertexFeature = NonNullable<MapLayerMouseEvent['features']>[number];
 
 const BlankWorldMap = BlankWorldMapJson as unknown as StyleSpecification;
-const countriesData = JSON.parse(countriesRaw);
+const countriesData = JSON.parse(countriesRaw) as FeatureCollection;
 
-const countriesByName = new Map<string, any>(
-  countriesData.features.map((f: any) => [f.properties?.name, f])
+const countriesByName = new Map<string, Feature>(
+  countriesData.features.map((f) => [f.properties?.name, f])
 );
 
 function bboxesOverlap(a: number[], b: number[]) {
@@ -34,19 +35,20 @@ function bboxesOverlap(a: number[], b: number[]) {
 }
 
 function getAbsorptionCandidates(countryEdits: Record<string, CountryData>) {
-  const candidates: { name: string; geometry: any }[] = [];
+  const candidates: { name: string; geometry: Geometry }[] = [];
   const seen = new Set<string>();
 
-  countriesData.features.forEach((feature: any) => {
+  countriesData.features.forEach((feature) => {
     const name = feature.properties?.name;
     seen.add(name);
     if (countryEdits[name]?.geometry === null) return;
-    candidates.push({ name, geometry: countryEdits[name]?.geometry ?? feature.geometry });
+    const geometry = countryEdits[name]?.geometry ?? feature.geometry;
+    if (geometry) candidates.push({ name, geometry });
   });
 
   Object.entries(countryEdits).forEach(([name, data]) => {
     if (seen.has(name)) return;
-    if (data.geometry === null || data.geometry === undefined) return;
+    if (!data.geometry) return;
     candidates.push({ name, geometry: data.geometry });
   });
 
@@ -54,15 +56,15 @@ function getAbsorptionCandidates(countryEdits: Record<string, CountryData>) {
 }
 
 function withUpdatedRing(
-  geometry: any,
+  geometry: Geometry,
   polygonIndex: number,
   ringIndex: number,
-  updateRing: (ring: number[][]) => number[][]
-) {
+  updateRing: (ring: Position[]) => Position[]
+): Geometry {
   if (geometry.type === 'Polygon') {
     return {
       ...geometry,
-      coordinates: geometry.coordinates.map((ring: number[][], i: number) =>
+      coordinates: geometry.coordinates.map((ring, i) =>
         i === ringIndex ? updateRing(ring) : ring
       )
     };
@@ -70,9 +72,9 @@ function withUpdatedRing(
   if (geometry.type === 'MultiPolygon') {
     return {
       ...geometry,
-      coordinates: geometry.coordinates.map((polygon: number[][][], pi: number) =>
+      coordinates: geometry.coordinates.map((polygon, pi) =>
         pi === polygonIndex
-          ? polygon.map((ring: number[][], ri: number) => (ri === ringIndex ? updateRing(ring) : ring))
+          ? polygon.map((ring, ri) => (ri === ringIndex ? updateRing(ring) : ring))
           : polygon
       )
     };
@@ -80,7 +82,7 @@ function withUpdatedRing(
   return geometry;
 }
 
-function moveRingVertex(ring: number[][], vertexIndex: number, newCoord: number[]) {
+function moveRingVertex(ring: Position[], vertexIndex: number, newCoord: Position): Position[] {
   const newRing = [...ring];
   newRing[vertexIndex] = newCoord;
   if (vertexIndex === 0) {
@@ -100,8 +102,7 @@ function App() {
   const [currentWorldName, setCurrentWorldName] = useState<string | null>(null);
   const [editingCountry, setEditingCountry] = useState<string | null>(null);
   const [allowOverlapping, setAllowOverlapping] = useState(false);
-  const [editedGeometries, setEditedGeometries] = useState<Record<string, any>>({});
-  const [editMode, setEditMode] = useState<'vertices' | 'draw' | null>(null);
+  const [editedGeometries, setEditedGeometries] = useState<Record<string, Geometry>>({});  const [editMode, setEditMode] = useState<'vertices' | 'draw' | null>(null);
   const mapRef = useRef<MapRef>(null);
   const [drawingPoints, setDrawingPoints] = useState<number[][]>([]);
   const [isAddingCountry, setIsAddingCountry] = useState(false);
@@ -167,9 +168,9 @@ function App() {
         return;
       }
 
-      const sourceFeature = turf.feature(sourceGeometry);
-      const targetFeature = turf.feature(targetGeometry);
-      const unioned = turf.union(turf.featureCollection([sourceFeature as any, targetFeature as any]));
+      const sourceFeature = turf.feature(sourceGeometry as Polygon | MultiPolygon);
+      const targetFeature = turf.feature(targetGeometry as Polygon | MultiPolygon);
+      const unioned = turf.union(turf.featureCollection([sourceFeature, targetFeature]));
 
       setCountryEdits(prev => ({
         ...prev,
@@ -206,7 +207,8 @@ function App() {
 
       const clickPoint = turf.point([e.lngLat.lng, e.lngLat.lat]);
       const originalFeature = countriesByName.get(editingCountry);
-      const base = editedGeometries[editingCountry] ?? originalFeature.geometry;
+      const base = editedGeometries[editingCountry] ?? originalFeature?.geometry;
+      if (!base) return;
 
       if (base.type === 'Polygon') {
         let bestRingIndex = 0;
@@ -299,13 +301,13 @@ function App() {
           const otherBbox = turf.bbox(otherGeometry);
           if (!bboxesOverlap(newBbox, otherBbox)) return;
 
-          const otherFeature = turf.feature(otherGeometry);
+          const otherFeature = turf.feature(otherGeometry as Polygon | MultiPolygon);
 
           try {
-            const intersection = turf.intersect(turf.featureCollection([newFeature as any, otherFeature as any]));
+            const intersection = turf.intersect(turf.featureCollection([newFeature, otherFeature]));
             if (!intersection) return;
 
-            const difference = turf.difference(turf.featureCollection([otherFeature as any, newFeature as any]));
+            const difference = turf.difference(turf.featureCollection([otherFeature, newFeature]));
 
             if (!difference) {
               countriesToAbsorb.push(updatedEdits[countryName]?.name ?? countryName);
@@ -428,7 +430,7 @@ function App() {
     setShowWorldsPanel(false);
     setSelectedCountry(null);
 
-    const geometries: Record<string, any> = {};
+    const geometries: Record<string, Geometry> = {};
     Object.entries(world.edits).forEach(([name, data]) => {
       if (data.geometry) {
         geometries[name] = data.geometry;
@@ -446,16 +448,16 @@ function App() {
       const originalFeature = countriesByName.get(editingCountry);
       const baseGeometry = geometry
         ?? countryEdits[editingCountry]?.geometry
-        ?? originalFeature.geometry;
+        ?? originalFeature?.geometry;
 
       const drawnPolygon = turf.polygon([[...drawingPoints, drawingPoints[0]]]);
-      const basePolygon = turf.feature(baseGeometry);
-      const unioned = turf.union(turf.featureCollection([basePolygon as any, drawnPolygon]));
+      const basePolygon = turf.feature(baseGeometry as Polygon | MultiPolygon);
+      const unioned = turf.union(turf.featureCollection([basePolygon, drawnPolygon]));
       if (unioned) geometry = unioned.geometry;
     }
 
     if (geometry) {
-      const newGeometry = turf.feature(geometry);
+      const newGeometry = turf.feature(geometry as Polygon | MultiPolygon);
 
       if (!allowOverlapping) {
         const newBbox = turf.bbox(newGeometry);
@@ -468,13 +470,13 @@ function App() {
           const otherBbox = turf.bbox(otherGeometry);
           if (!bboxesOverlap(newBbox, otherBbox)) return;
 
-          const otherFeature = turf.feature(otherGeometry);
+          const otherFeature = turf.feature(otherGeometry as Polygon | MultiPolygon);
 
           try {
-            const intersection = turf.intersect(turf.featureCollection([newGeometry as any, otherFeature as any]));
+            const intersection = turf.intersect(turf.featureCollection([newGeometry, otherFeature]));
             if (!intersection) return;
 
-            const difference = turf.difference(turf.featureCollection([otherFeature as any, newGeometry as any]));
+            const difference = turf.difference(turf.featureCollection([otherFeature, newGeometry]));
 
             if (!difference) {
               countriesToAbsorb.push(countryEdits[name]?.name ?? name);
@@ -527,13 +529,13 @@ function App() {
   const modifiedGeoJSON = useMemo(() => ({
     ...countriesData,
     features: countriesData.features
-      .filter((feature: any) => {
+      .filter((feature) => {
         const name = feature.properties?.name;
         const edit = countryEdits[name];
         if (!edit) return true;
         return edit.geometry !== null;
       })
-      .map((feature: any) => {
+      .map((feature) => {
         const name = feature.properties?.name;
         const edit = countryEdits[name];
         return {
@@ -628,8 +630,8 @@ function App() {
     if (drawingPoints.length >= 3) {
       try {
         const drawnPolygon = turf.polygon([[...drawingPoints, drawingPoints[0]]]);
-        const basePolygon = turf.feature(base);
-        const unioned = turf.union(turf.featureCollection([basePolygon as any, drawnPolygon]));
+        const basePolygon = turf.feature(base as Polygon | MultiPolygon);
+        const unioned = turf.union(turf.featureCollection([basePolygon, drawnPolygon]));
         if (unioned) geometry = unioned.geometry;
       } catch {
         geometry = base;
@@ -678,7 +680,7 @@ function App() {
       ...newCountries.map(([name, data]) => ({
         type: 'Feature' as const,
         properties: { name, ...(data.properties || {}), customColor: data.color },
-        geometry: data.geometry
+        geometry: data.geometry as Geometry
       }))
     ]
   }), [modifiedGeoJSON, newCountries]);
@@ -738,7 +740,9 @@ function App() {
 
     setEditedGeometries(prev => {
       const originalFeature = countriesByName.get(editingCountry);
-      const base = prev[editingCountry] ?? originalFeature.geometry;
+      const base = prev[editingCountry] ?? originalFeature?.geometry;
+      if (!base) return prev;
+
       const updated = withUpdatedRing(
         base,
         draggingVertex.polygonIndex,
@@ -758,7 +762,8 @@ function App() {
 
     setEditedGeometries(prev => {
       const originalFeature = countriesByName.get(editingCountry);
-      const base = prev[editingCountry] ?? originalFeature.geometry;
+      const base = prev[editingCountry] ?? originalFeature?.geometry;
+      if (!base || (base.type !== 'Polygon' && base.type !== 'MultiPolygon')) return prev;
 
       const targetRing = base.type === 'Polygon'
         ? base.coordinates[ringIndex]
@@ -820,7 +825,7 @@ function App() {
 
         renderedFeatures.forEach(f => {
           if (f.geometry.type !== 'Point') return;
-          const coords = (f.geometry as any).coordinates;
+          const coords = f.geometry.coordinates as [number, number];
           const projected = map.project(coords);
           const dx = projected.x - point.x;
           const dy = projected.y - point.y;
@@ -1030,6 +1035,7 @@ function App() {
               ? countryEdits[selectedCountry!]?.geometry
               : countryEdits[selectedCountry!]?.geometry ??
                 countriesByName.get(selectedCountry!)?.geometry;
+            if (!geometry) return;
             setEditedGeometries(prev => ({
               ...prev,
               [selectedCountry!]: geometry
