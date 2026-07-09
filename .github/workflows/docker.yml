@@ -9,6 +9,9 @@ on:
 jobs:
   frontend:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +58,9 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -85,6 +91,6 @@ jobs:
         with:
           context: ./server
           push: ${{ github.event_name == 'push' }}
-          tags: ghcr.io/${{ env.REPO_OWNER }}/map-editor-frontend:latest
+          tags: ghcr.io/${{ env.REPO_OWNER }}/map-editor-backend:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
