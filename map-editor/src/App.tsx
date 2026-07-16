@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef } from 'react';
+import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import maplibregl from 'maplibre-gl';
 import MapGL, { Source, Layer } from 'react-map-gl/maplibre';
 import type { MapLayerMouseEvent, MapRef } from 'react-map-gl/maplibre';
@@ -24,17 +24,13 @@ interface CountryData {
 type VertexFeature = NonNullable<MapLayerMouseEvent['features']>[number];
 
 const BlankWorldMap = BlankWorldMapJson as unknown as StyleSpecification;
-const countriesData = JSON.parse(countriesRaw) as FeatureCollection;
-
-const countriesByName = new Map<string, Feature>(
-  countriesData.features.map((f) => [f.properties?.name, f])
-);
+const defaultCountriesData = JSON.parse(countriesRaw) as FeatureCollection;
 
 function bboxesOverlap(a: number[], b: number[]) {
   return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
 }
 
-function getAbsorptionCandidates(countryEdits: Record<string, CountryData>) {
+function getAbsorptionCandidates(countryEdits: Record<string, CountryData>, countriesData: FeatureCollection) {
   const candidates: { name: string; geometry: Geometry }[] = [];
   const seen = new Set<string>();
 
@@ -93,7 +89,26 @@ function moveRingVertex(ring: Position[], vertexIndex: number, newCoord: Positio
   return newRing;
 }
 
+function downloadJSON(data: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function App() {
+  const [countriesData, setCountriesData] = useState<FeatureCollection>(defaultCountriesData);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const isFirstRender = useRef(true);
+
+  const countriesByName = useMemo(
+    () => new Map<string, Feature>(countriesData.features.map((f) => [f.properties?.name, f])),
+    [countriesData]
+  );
+  
   const [hoveredCountry, setHoveredCountry] = useState<string | null>(null);
   const [selectedCountry, setSelectedCountry] = useState<string | null>(null);
   const [countryEdits, setCountryEdits] = useState<Record<string, CountryData>>({});
@@ -116,6 +131,13 @@ function App() {
     isNewCountryVertex?: boolean;
   } | null>(null);
   const [absorbingCountry, setAbsorbingCountry] = useState<string | null>(null);
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    setHasUnsavedChanges(true);
+  }, [countryEdits]);
 
   const handleSetEditMode = useCallback((mode: 'vertices' | 'draw' | null) => {
     setEditMode(mode);
@@ -297,7 +319,7 @@ function App() {
         const newBbox = turf.bbox(newFeature);
         const countriesToAbsorb: string[] = [];
 
-        getAbsorptionCandidates(countryEdits).forEach(({ name: countryName, geometry: otherGeometry }) => {
+        getAbsorptionCandidates(countryEdits, countriesData).forEach(({ name: countryName, geometry: otherGeometry }) => {
           const otherBbox = turf.bbox(otherGeometry);
           if (!bboxesOverlap(newBbox, otherBbox)) return;
 
@@ -429,6 +451,7 @@ function App() {
     setCurrentWorldName(world.name);
     setShowWorldsPanel(false);
     setSelectedCountry(null);
+    setHasUnsavedChanges(false);
 
     const geometries: Record<string, Geometry> = {};
     Object.entries(world.edits).forEach(([name, data]) => {
@@ -438,6 +461,59 @@ function App() {
     });
     setEditedGeometries(geometries);
   }, []);
+
+  const confirmDiscardUnsavedChanges = useCallback(async () => {
+    if (!hasUnsavedChanges) return true;
+
+    const shouldSave = window.confirm('You have unsaved changes. Save before continuing?');
+    if (shouldSave) {
+      await handleSave();
+      return true;
+    }
+
+    return window.confirm('Discard unsaved changes and continue anyway?');
+  }, [hasUnsavedChanges, handleSave]);
+
+  const handleImportCountries = useCallback(async (file: File) => {
+    const proceed = await confirmDiscardUnsavedChanges();
+    if (!proceed) return;
+
+    const text = await file.text();
+    let parsed: FeatureCollection;
+    try {
+      parsed = JSON.parse(text) as FeatureCollection;
+    } catch {
+      alert('That file is not valid JSON.');
+      return;
+    }
+
+    if (parsed.type !== 'FeatureCollection' || !Array.isArray(parsed.features)) {
+      alert('Expected a GeoJSON FeatureCollection. Export the current map to see the expected format.');
+      return;
+    }
+
+    const normalized: FeatureCollection = {
+      ...parsed,
+      features: parsed.features.map((feature, index) => ({
+        ...feature,
+        properties: {
+          ...feature.properties,
+          name: feature.properties?.name ?? `country-${index + 1}`
+        }
+      }))
+    };
+
+    setCountriesData(normalized);
+    setCountryEdits({});
+    setEditedGeometries({});
+    setSelectedCountry(null);
+    setEditingCountry(null);
+    setEditMode(null);
+    setCurrentWorldId(null);
+    setCurrentWorldName(null);
+    setHasUnsavedChanges(false);
+  }, [confirmDiscardUnsavedChanges]);
+
 
   const handleDoneEditing = useCallback(() => {
     if (!editingCountry) return;
@@ -464,7 +540,7 @@ function App() {
         const updatedEdits = { ...countryEdits };
         const countriesToAbsorb: string[] = [];
 
-        getAbsorptionCandidates(countryEdits).forEach(({ name, geometry: otherGeometry }) => {
+        getAbsorptionCandidates(countryEdits, countriesData).forEach(({ name, geometry: otherGeometry }) => {
           if (name === editingCountry) return;
 
           const otherBbox = turf.bbox(otherGeometry);
@@ -685,6 +761,11 @@ function App() {
     ]
   }), [modifiedGeoJSON, newCountries]);
 
+  const handleExportCountries = useCallback(() => {
+    downloadJSON(allCountriesData, 'countries.geojson');
+  }, [allCountriesData]);
+
+
   const onVertexMouseDown = useCallback((e: MapLayerMouseEvent, feature: VertexFeature) => {
     e.preventDefault();
 
@@ -868,6 +949,8 @@ function App() {
           setDrawingPoints([]);
           setEditMode(null);
         }}
+        onImportCountries={handleImportCountries}
+        onExportCountries={handleExportCountries}
       />
       <MapGL
         initialViewState={{ longitude: 0, latitude: 20, zoom: 1.5 }}
