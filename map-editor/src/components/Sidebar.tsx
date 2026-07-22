@@ -5,6 +5,9 @@ interface SidebarProps {
   onToggleAddCountry: () => void;
   onImportCountries: (file: File) => void;
   onExportCountries: () => void;
+  hasCustomBackground: boolean;
+  onUploadBackgroundImage: (file: File) => void;
+  onResetBackgroundImage: () => void;
 }
 
 const iconButtonStyle = (active: boolean) => ({
@@ -32,8 +35,12 @@ function Sidebar({
   onToggleAddCountry,
   onImportCountries,
   onExportCountries,
+  hasCustomBackground,
+  onUploadBackgroundImage,
+  onResetBackgroundImage,
 }: SidebarProps) {
   const countriesFileInputRef = useRef<HTMLInputElement>(null);
+  const backgroundFileInputRef = useRef<HTMLInputElement>(null);
 
   return (
     <div style={{
@@ -86,6 +93,37 @@ function Sidebar({
       </button>
 
       <div style={dividerStyle} />
+
+      <input
+        ref={backgroundFileInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        style={{ display: 'none' }}
+        onChange={e => {
+          const file = e.target.files?.[0];
+          if (file) onUploadBackgroundImage(file);
+          e.target.value = '';
+        }}
+      />
+      <button
+        onClick={() => backgroundFileInputRef.current?.click()}
+        title="Upload Background Map"
+        style={iconButtonStyle(false)}
+      >
+        ▣
+      </button>
+      {hasCustomBackground && (
+        <button
+          onClick={() => {
+            const confirmed = window.confirm('Reset to the default world map?');
+            if (confirmed) onResetBackgroundImage();
+          }}
+          title="Reset to Default Map"
+          style={iconButtonStyle(false)}
+        >
+          ↺
+        </button>
+      )}
     </div>
   );
 }

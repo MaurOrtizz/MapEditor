@@ -6,7 +6,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import countriesRaw from './data/countries_mid_res.geojson?raw';
 import BlankWorldMapJson from './data/BlankWorldMap.json'
 import type { StyleSpecification } from 'maplibre-gl';
-import { api, type WorldData } from './api';
+import { api, type WorldData, type BackgroundBounds } from './api';
 import Navbar from './components/Navbar';
 import CountryPanel from './components/CountryPanel';
 import WorldsPanel from './components/WorldsPanel';
@@ -138,6 +138,8 @@ function App() {
     }
     setHasUnsavedChanges(true);
   }, [countryEdits]);
+  const [backgroundImage, setBackgroundImage] = useState<string | null>(null);
+  const [backgroundBounds, setBackgroundBounds] = useState<BackgroundBounds | null>(null);
 
   const handleSetEditMode = useCallback((mode: 'vertices' | 'draw' | null) => {
     setEditMode(mode);
@@ -432,18 +434,25 @@ function App() {
     if (currentWorldId) {
       await api.updateWorld(currentWorldId, {
         name: currentWorldName!,
-        edits: editsToSave
+        edits: editsToSave,
+        background_image: backgroundImage,
+        background_bounds: backgroundBounds
       });
       alert('World saved!');
     } else {
       const name = prompt('Name your world:');
       if (!name) return;
-      const created = await api.createWorld({ name, edits: editsToSave });
+      const created = await api.createWorld({
+        name,
+        edits: editsToSave,
+        background_image: backgroundImage,
+        background_bounds: backgroundBounds
+      });
       setCurrentWorldId(created.id!);
       setCurrentWorldName(created.name);
       alert('World saved!');
     }
-  }, [currentWorldId, currentWorldName, countryEdits]);
+  }, [currentWorldId, currentWorldName, countryEdits, backgroundImage, backgroundBounds]);
 
   const handleLoad = useCallback((world: WorldData) => {
     setCountryEdits(world.edits);
@@ -452,6 +461,8 @@ function App() {
     setShowWorldsPanel(false);
     setSelectedCountry(null);
     setHasUnsavedChanges(false);
+    setBackgroundImage(world.background_image ?? null);
+    setBackgroundBounds(world.background_bounds ?? null);
 
     const geometries: Record<string, Geometry> = {};
     Object.entries(world.edits).forEach(([name, data]) => {
@@ -460,6 +471,37 @@ function App() {
       }
     });
     setEditedGeometries(geometries);
+  }, []);
+
+  const handleUploadBackgroundImage = useCallback(async (file: File) => {
+    const { url } = await api.uploadBackgroundImage(file);
+
+    const map = mapRef.current?.getMap();
+    const bounds = map?.getBounds();
+
+    const nextBounds: BackgroundBounds = bounds
+      ? [
+          [bounds.getWest(), bounds.getNorth()],
+          [bounds.getEast(), bounds.getNorth()],
+          [bounds.getEast(), bounds.getSouth()],
+          [bounds.getWest(), bounds.getSouth()]
+        ]
+      : [
+          [-180, 85],
+          [180, 85],
+          [180, -85],
+          [-180, -85]
+        ];
+
+    setBackgroundImage(url);
+    setBackgroundBounds(nextBounds);
+    setHasUnsavedChanges(true);
+  }, []);
+
+  const handleResetBackgroundImage = useCallback(() => {
+    setBackgroundImage(null);
+    setBackgroundBounds(null);
+    setHasUnsavedChanges(true);
   }, []);
 
   const confirmDiscardUnsavedChanges = useCallback(async () => {
@@ -616,6 +658,7 @@ function App() {
         const edit = countryEdits[name];
         return {
           ...feature,
+          id: name,
           geometry: edit?.geometry ?? feature.geometry,
           properties: {
             ...feature.properties,
@@ -755,6 +798,7 @@ function App() {
       ...modifiedGeoJSON.features,
       ...newCountries.map(([name, data]) => ({
         type: 'Feature' as const,
+        id: name,
         properties: { name, ...(data.properties || {}), customColor: data.color },
         geometry: data.geometry as Geometry
       }))
@@ -801,9 +845,11 @@ function App() {
       return;
     }
 
-    const feature = e.features?.[0];
+    const feature = e.features?.find((f) => f.layer?.id === 'countries-fill');
     if (!draggingVertex || !editingCountry) {
-      setHoveredCountry(feature ? feature.properties?.name : null);
+      const nextHovered = feature ? feature.properties?.name : null;
+      if (nextHovered === hoveredCountry) return;
+      setHoveredCountry(nextHovered);
       return;
     }
 
@@ -951,6 +997,9 @@ function App() {
         }}
         onImportCountries={handleImportCountries}
         onExportCountries={handleExportCountries}
+        hasCustomBackground={!!backgroundImage}
+        onUploadBackgroundImage={handleUploadBackgroundImage}
+        onResetBackgroundImage={handleResetBackgroundImage}
       />
       <MapGL
         initialViewState={{ longitude: 0, latitude: 20, zoom: 1.5 }}
@@ -975,6 +1024,16 @@ function App() {
         }}
         ref={mapRef}
       >
+        {backgroundImage && backgroundBounds && (
+          <Source
+            id="custom-background"
+            type="image"
+            url={backgroundImage}
+            coordinates={backgroundBounds}
+          >
+            <Layer id="custom-background-layer" type="raster" paint={{ 'raster-opacity': 1 }} />
+          </Source>
+        )}
         <Source id="countries" type="geojson" data={allCountriesData}>
           <Layer
             id="countries-fill"
